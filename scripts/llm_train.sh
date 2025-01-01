@@ -2,14 +2,11 @@ export WANDB_PROJECT="LLM"
 export WANDB_RUN_GROUP='gemma-2-9b/NewOrcaAlpacaChatGPT'
 
 
-# export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_DISTRIBUTED_DEBUG="DETAIL"
 export TORCHDYNAMO_DISABLE="1"
 
 export OMP_NUM_THREADS=2
-        # --resume_from_checkpoint='/home/jp/output_dir/gemma-2-9b/NewOrcaAlpacaChatGPT/packing-sft/checkpoint-178' \
 
-# torchrun --nproc-per-node=4 \
 deepspeed --include=localhost:0,1,2,3 --master_port=8532 \
     '/root/workspace/main.py' \
     --output_dir='/root/output_dir/gemma-2-9b/NewOrcaAlpacaChatGPT/packing-sft' \
