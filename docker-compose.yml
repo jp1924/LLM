@@ -1,0 +1,30 @@
+services:
+  train-contrainer:
+    container_name: llm
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./:/root/workspace
+      - ./.vscode:/root/.vscode
+      - ~/.cache:/root/.cache
+      - ~/output_dir:/root/output_dir
+    tty: true
+    shm_size: 126G
+    environment:
+      - LC_ALL=C.UTF-8
+      - LANG=C.UTF-8
+      - TZ=Asia/Seoul
+      - PATH=/usr/local/cuda/bin:$PATH
+      - LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - HF_TOKEN=${HF_TOKEN}
+    cap_drop:
+      - SYS_ADMIN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]

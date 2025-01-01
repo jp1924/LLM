@@ -1,0 +1,38 @@
+{
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "notebook.formatOnSave.enabled": true,
+    "[python]": {
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        },
+        "editor.formatOnType": true,
+    },
+    "[markdown]": {
+        "editor.formatOnSave": true,
+        "editor.formatOnPaste": true
+    },
+    "editor.codeActionsOnSave": {
+        "source.fixAll.markdownlint": "explicit"
+    },
+    "editor.minimap.renderCharacters": false,
+    "editor.minimap.enabled": false,
+    "ruff.lint.args": [
+        "--config=/root/workspace/ruff.toml",
+    ],
+    "ruff.format.args": [
+        "--config=/root/workspace/ruff.toml"
+    ],
+    "files.refactoring.autoSave": true,
+    "ruff.lint.preview": true,
+    "ruff.organizeImports": true,
+    "ruff.format.preview": false,
+    "ruff.lint.enable": true,
+    "ruff.enable": true,
+    "markdownlint.run": "onSave",
+    "testing.coverageToolbarEnabled": true,
+    "[json]": {
+        "editor.defaultFormatter": "vscode.json-language-features"
+    },
+}
