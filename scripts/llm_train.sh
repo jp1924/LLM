@@ -51,7 +51,7 @@ deepspeed --include=localhost:0,1,2,3 --master_port=8532 \
     --torch_compile=true \
     --gradient_checkpointing=true \
     --gradient_checkpointing_kwargs='{"use_reentrant": false}' \
-    --chat_template="{% if not add_generation_prompt is defined %}{% set add_last_empty_assistant = false %}{% endif %}{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>' }}{% if message.role == 'user' %}{{ '### User:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'system' %}{{ '### System:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'assistant' %}{{ '### Assistant:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{% else %}{{ '' }}{% endif %}{{ '<end_of_turn>' }}{% endfor %}{% if not add_generation_prompt %}{{ eos_token }}{% elif add_generation_prompt %}{{ '<start_of_turn>' }}{{ '### Assistant:\n' }}{% else %}{# Do nothing #}{% endif %}" \
+    --chat_template="{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>' }}{% if message.role == 'user' %}{{ '### User:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'system' %}{{ '### System:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'assistant' %}{{ '### Assistant:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{% else %}{{ '' }}{% endif %}{{ '<end_of_turn>' }}{% endfor %}{% if not add_generation_prompt %}{{ eos_token }}{% elif add_generation_prompt %}{{ '<start_of_turn>' }}{{ '### Assistant:\n' }}{% else %}{# Do nothing #}{% endif %}" \
     --sot_token='<start_of_turn>' \
     --eot_token='<end_of_turn>' \
     --response_template="[6176, 18145, 235292, 108]" \
@@ -59,6 +59,7 @@ deepspeed --include=localhost:0,1,2,3 --master_port=8532 \
     --dataloader_prefetch_factor=5 \
     --dataloader_num_workers=4 \
     --attn_implementation='flash_attention_2' \
+    --remove_unused_columns=true \
     --do_packing=true \
     --packing_max_elem=20 \
     --packing_shuffle=true \
