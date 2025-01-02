@@ -524,7 +524,7 @@ git merge feature
     "default": [],
 }
 
-DEFAULT_CHAT_TEMPLATE = "{% if not add_last_empty_assistant is defined %}{% set add_last_empty_assistant = false %}{% endif %}{% if not include_last_assistant is defined %}{% set include_last_assistant = true %}{% endif %}{% for message in messages %}{{ sot_token }}{% if message.role == 'user' %}{{ '### User:\\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ img_token }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\\n\\n' }}{% elif message.role == 'system' %}{{ '### System:\\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ img_token }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\\n\\n' }}{% elif message.role == 'assistant' %}{{ '### Assistant:\\n' }}{% if not loop.last or include_last_assistant %}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{% endif %}{% else %}{# Do nothing #}{% endif %}{{ eot_token }}{% endfor %}{% if not include_last_assistant %}{# Do nothing #}{% elif not add_last_empty_assistant %}{{ eos_token }}{% elif add_last_empty_assistant %}{{ '### Assistant:\\n' }}{% else %}{# Do nothing #}{% endif %}"
+DEFAULT_CHAT_TEMPLATE = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% if not include_last_assistant is defined %}{% set include_last_assistant = true %}{% endif %}{% for message in messages %}{{ sot_token }}{% if message.role == 'user' %}{{ '### User:\\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ img_token }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\\n\\n' }}{% elif message.role == 'system' %}{{ '### System:\\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ img_token }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\\n\\n' }}{% elif message.role == 'assistant' %}{{ '### Assistant:\\n' }}{% if not loop.last or include_last_assistant %}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{% endif %}{% else %}{# Do nothing #}{% endif %}{{ eot_token }}{% endfor %}{% if not include_last_assistant %}{# Do nothing #}{% elif not add_generation_prompt %}{{ eos_token }}{% elif add_generation_prompt %}{{ '### Assistant:\\n' }}{% else %}{# Do nothing #}{% endif %}"
 
 
 def get_args():
@@ -598,7 +598,7 @@ def main(args, gpu_counts) -> None:
         # HACK: GPU device 확인해 볼 것
         llm = LLM(
             model=model_dir_path.as_posix(),
-            tensor_parallel_size=4,  # gpu_counts,
+            tensor_parallel_size=1,  # gpu_counts,
             max_model_len=args.model_len,
             gpu_memory_utilization=args.gpu_memory_utilization,
             trust_remote_code=True,  # !
@@ -612,8 +612,8 @@ def main(args, gpu_counts) -> None:
         print(f"현재 사용하고 있는 eot_token: {args.eot_token}")
         print(f"현재 사용하고 있는 sot_token: {args.sot_token}")
 
-        if "add_last_empty_assistant" not in chat_template:
-            raise ValueError("chat_template에 add_last_empty_assistant가 없습니다.")
+        if "add_generation_prompt" not in chat_template:
+            raise ValueError("chat_template에 add_generation_prompt가 없습니다.")
         if "sot_token" not in chat_template:
             warnings.warn(
                 "chat_template에 sot_token이 없습니다. apply_chat_template시 예상대로 동작하지 않을 수 있습니다."
@@ -656,20 +656,13 @@ def main(args, gpu_counts) -> None:
                         {"role": "user", "content": question[0]},
                     ],
                     tokenize=False,
-                    eot_token=args.eot_token,
-                    sot_token=args.sot_token,
-                    add_last_empty_assistant=True,
+                    add_generation_prompt=True,
                 )
 
                 if not text.startswith(bos_token):
                     text = bos_token + text
 
                 return text
-
-            single_turn_questions = df_questions["questions"].map(format_single_turn_question)
-            single_turn_outputs = [
-                output.outputs[0].text.strip() for output in llm.generate(single_turn_questions, sampling_params)
-            ]
 
             def format_double_turn_question(question, single_turn_output):
                 text = llm.llm_engine.tokenizer.tokenizer.apply_chat_template(
@@ -680,14 +673,17 @@ def main(args, gpu_counts) -> None:
                         {"role": "user", "content": question[1]},
                     ],
                     tokenize=False,
-                    eot_token=args.eot_token,
-                    sot_token=args.sot_token,
-                    add_last_empty_assistant=True,
+                    add_generation_prompt=True,
                 )
                 if not text.startswith(bos_token):
                     text = bos_token + text
 
                 return text
+
+            single_turn_questions = df_questions["questions"].map(format_single_turn_question)
+            single_turn_outputs = [
+                output.outputs[0].text.strip() for output in llm.generate(single_turn_questions, sampling_params)
+            ]
 
             multi_turn_questions = df_questions[["questions", "id"]].apply(
                 lambda x: format_double_turn_question(x["questions"], single_turn_outputs[x["id"] - 1]),
