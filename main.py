@@ -275,25 +275,26 @@ class PackingTrainer(Trainer):
 
         Subclass and override this method if you want to inject some custom behavior.
         """
-        if self.train_dataset is None:
-            raise ValueError("Trainer: training requires a train_dataset.")
 
-        def __packing_getitems__(dataset, keys: List[List[int]]) -> List:
+        def __packing_getitems__(train_dataset, keys: List[List[int]]) -> List:
             """Can be used to get a batch using a list of integers indices."""
 
             return_ls = list()
             for key in keys:
-                batch = dataset.__getitem__(key)
+                batch = train_dataset.__getitem__(key)
                 n_examples = len(batch[next(iter(batch))])
 
                 return_ls.append([{col: array[i] for col, array in batch.items()} for i in range(n_examples)])
             return return_ls
 
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
         # NOTE: packing을 사용할 경우 packing에 알맞은 getitems를 사용하도록 합니다.
         if self.args.do_packing:
             # 래핑된 함수를 정의하여 self를 전달할 수 있도록 합니다.
             def getitems_wrapper(keys):
-                return __packing_getitems__(self.train_dataset, keys)
+                return __packing_getitems__(train_dataset, keys)
 
             setattr(self.train_dataset, "__getitems__", getitems_wrapper)
 
@@ -371,50 +372,90 @@ class PackingTrainer(Trainer):
 
 
 class DataPackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
-    def __init__(self, pack_max_seq: int, dtype, **kwargs):
+    def __init__(self, args: SFTTrainingArguments, dtype, **kwargs):
         super().__init__(**kwargs)
-        self.pack_max_seq = pack_max_seq
+        self.pack_max_seq = args.data_max_length
+        self.attn_implementation = args.attn_implementation
+        self.args = args
+        self.do_packing = args.do_packing
         self.dtype = dtype
 
-    def torch_call(self, examples):
-        # batch_size = len(examples)
-        if isinstance(examples, list) and isinstance(examples[0], dict):
-            batch = super().torch_call(examples)
-            # min_dtype = torch.finfo(self.dtype).min
-            # labels = torch.full((batch_size, self.pack_max_seq), self.ignore_index)
-            # input_ids = torch.zeros((batch_size, self.pack_max_seq), dtype=torch.long)
-            # position_ids = torch.zeros((batch_size, self.pack_max_seq), dtype=torch.long) - 1
-            # attention_mask = torch.full((batch_size, 1, self.pack_max_seq, self.pack_max_seq), min_dtype)
-            # input_lengths = list()
-            # labels_ls = list()
-            # for batch_idx, packing_ls in enumerate(examples):
-            #     start_idx = 0
-            #     for pack in packing_ls:
-            #         batch = super().torch_call([pack])
-            #         length = int(pack["length"])
-            #         end_idx = start_idx + length
+    def torch_call(self, features_ls):
+        # # 어떤 모델은 pad토큰이 있는 녀석도 있고, 없는 녀석도 있다, 거기에 packing할지 말지에 따라 분기문 만드는건 복잡하다
+        # # 차라리 tokenizer에서 pad 지원하던 말던 상관없이 packing이 된 상태로 입력하자.
+        # if not self.do_packing and self.tokenizer.pad_token_id is not None:
+        #     # NOTE: 이 부분 나중에 flatten 하든 뭘 하든, 일단 수정해야 할 듯.
+        #     batch = super().torch_call(features_ls)
 
-            #         pack_attention_mask = torch.tril(torch.ones((length, length), dtype=torch.float32), diagonal=0).to(
-            #             torch.bool
-            #         )
+        if not self.do_packing:
+            input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
+            for features in features_ls:
+                batch = super().torch_call([features])
+                input_ids, labels = batch.input_ids[0], batch.labels[0]
+                length = len(input_ids)
 
-            #         attention_mask[batch_idx, 0, start_idx:end_idx, start_idx:end_idx][pack_attention_mask] = 0
-            #         position_ids[batch_idx, start_idx:end_idx] = torch.arange(length)
-            #         input_ids[batch_idx, start_idx:end_idx] = batch["input_ids"][0]
-            #         labels[batch_idx, start_idx:end_idx] = batch["labels"][0]
-            #         input_lengths.append(length)
-            #         labels_ls.append({"input_ids": batch["labels"][0]})
+                labels_ls.append(labels)
+                input_ids_ls.append(input_ids)
+                input_length_ls.append(length)
+                position_ids_ls.append(torch.arange(length))
 
-            #         start_idx = end_idx
-            # batch = dict()
-            # batch["labels"] = labels
-            # batch["input_ids"] = input_ids
-            # batch["position_ids"] = position_ids
-            # batch["attention_mask"] = attention_mask
-            # batch["input_lengths"] = torch.tensor(input_lengths)
-        elif isinstance(examples, list) and isinstance(examples[0], list):
+            total_length = sum(input_length_ls)
+            attention_mask = torch.full((1, 1, total_length, total_length), torch.finfo(self.dtype).min)
+
+            start_idx, end_idx = 0, 0
+            for length in input_length_ls:
+                end_idx += length
+
+                one_tensor = torch.ones((length, length), dtype=torch.float32)
+                mask = torch.tril(one_tensor, diagonal=0).to(dtype=torch.bool)
+                attention_mask[0, 0, start_idx:end_idx, start_idx:end_idx][mask] = 0
+
+                start_idx = end_idx
+
+            # from PIL import Image
+            # Image.fromarray((attention_mask == 0).numpy()[0, 0].astype(np.uint8) * 255, mode="L").save('packing_attention_mask.png')
+            batch = dict()
+            batch["labels"] = torch.concat(labels_ls)[None]
+            batch["input_ids"] = torch.concat(input_ids_ls)[None]
+            batch["position_ids"] = torch.concat(position_ids_ls)[None]
+            batch["attention_mask"] = attention_mask
+
+        elif not self.do_packing and self.attn_implementation == "eager":
+            input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
+            for packing_ls in features_ls:
+                for pack in packing_ls:
+                    batch = super().torch_call([pack])
+                    input_ids, labels = batch.input_ids[0], batch.labels[0]
+                    length = len(input_ids)
+
+                    labels_ls.append(labels)
+                    input_ids_ls.append(input_ids)
+                    input_length_ls.append(length)
+                    position_ids_ls.append(torch.arange(length))
+
+            total_length = sum(input_length_ls)
+            attention_mask = torch.full((1, 1, total_length, total_length), torch.finfo(self.dtype).min)
+
+            start_idx, end_idx = 0, 0
+            for length in input_length_ls:
+                end_idx += length
+
+                one_tensor = torch.ones((length, length), dtype=torch.float32)
+                mask = torch.tril(one_tensor, diagonal=0).to(dtype=torch.bool)
+                attention_mask[0, 0, start_idx:end_idx, start_idx:end_idx][mask] = 0
+
+                start_idx = end_idx
+
+            # from PIL import Image
+            # Image.fromarray((attention_mask == 0).numpy()[0, 0].astype(np.uint8) * 255, mode="L").save('packing_attention_mask.png')
+            batch = dict()
+            batch["labels"] = torch.concat(labels_ls)[None]
+            batch["input_ids"] = torch.concat(input_ids_ls)[None]
+            batch["position_ids"] = torch.concat(position_ids_ls)[None]
+            batch["attention_mask"] = attention_mask
+        elif self.do_packing and self.attn_implementation == "flash_attention_2":
             pack_input_ids, pack_labels, pack_position_ids = list(), list(), list()
-            for packing_ls in examples:
+            for packing_ls in features_ls:
                 for pack in packing_ls:
                     batch = super().torch_call([{"input_ids": pack["input_ids"]}])
                     pack_labels.append(batch.labels[0])
@@ -425,6 +466,9 @@ class DataPackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
             batch["labels"] = torch.concat(pack_labels)[None]
             batch["input_ids"] = torch.concat(pack_input_ids)[None]
             batch["position_ids"] = torch.concat(pack_position_ids)[None]
+        else:
+            raise ValueError("아직 구현 안함")
+
         return batch
 
 
@@ -501,7 +545,7 @@ def main(train_args: SFTTrainingArguments) -> None:
                 }
                 filter_cache_file_name = {
                     x: train_args.cache_dir.joinpath(
-                        f"filter_{train_args.data_max_length}_{name}-{x}_{train_args.cache_file_name}"
+                        f"filter_{f'{truncate_map[x]}-' if x in truncate_map else ''}{train_args.data_max_length}_{name}-{x}_{train_args.cache_file_name}"
                     ).as_posix()
                     for x in datasets
                 }
@@ -518,13 +562,9 @@ def main(train_args: SFTTrainingArguments) -> None:
             )
 
             for dataset_key in datasets:
-                dataset = datasets[dataset_key]
-                dataset.set_format("pt")
-                original_size = dataset_original_size[dataset_key]
-
+                dataset, original_size = datasets[dataset_key], dataset_original_size[dataset_key]
                 if dataset_key in truncate_map:
-                    truncate_size = truncate_map[dataset_key]
-                    dataset_size = len(dataset)
+                    truncate_size, dataset_size = truncate_map[dataset_key], len(dataset)
                     dataset = (
                         dataset  # 데이터가 너무 작은 경우
                         if dataset_size <= truncate_size
@@ -564,7 +604,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         train_dataset = None
         if train_dataset_ls:
             train_dataset = concatenate_datasets(train_dataset_ls)
-
+            train_dataset.set_format("pt")
             if is_main_process(train_args.local_rank):
                 logger.info(f"train_dataset:\n{train_dataset}")
 
@@ -584,21 +624,19 @@ def main(train_args: SFTTrainingArguments) -> None:
 
         sample_dataset = train_dataset or valid_dataset or test_dataset
         if sample_dataset and is_main_process(train_args.local_rank):
-            response_template = getattr(train_args, "response_template", None)
-            instruction_template = getattr(train_args, "instruction_template", None)
             formated_instruct = tokenizer.decode(sample_dataset[0]["input_ids"], skip_special_tokens=False)
             logger.info(f"formated_instruct: {formated_instruct}")
 
-            if response_template is not None:
-                response_template = tokenizer.decode(response_template, skip_special_tokens=False)
+            if train_args.response_template is not None:
+                response_template = tokenizer.decode(train_args.response_template, skip_special_tokens=False)
                 logger.info(f"response_template: {response_template}")
                 if response_template not in formated_instruct:
                     raise ValueError("이거 response_template이 formated_instruct에 포함되어 있지 않음. 다시 설정하셈")
             else:
-                raise logger.error("response_template이 없음. 다시 서정하셈.")
+                raise logger.error("response_template이 없음. 다시 설정하셈.")
 
-            if instruction_template is not None:
-                instruction_template = tokenizer.decode(instruction_template, skip_special_tokens=False)
+            if train_args.instruction_template is not None:
+                instruction_template = tokenizer.decode(train_args.instruction_template, skip_special_tokens=False)
                 logger.info(f"instruction_template: {instruction_template}")
                 if instruction_template not in formated_instruct:
                     raise ValueError(
@@ -606,6 +644,7 @@ def main(train_args: SFTTrainingArguments) -> None:
                     )
             else:
                 logger.warning("instruction_template이 없음. 근데 애러는 발생하지 않고 그냥 패스함.")
+
         elif sample_dataset is None:
             logger.warning("train, valid, test데이터가 전혀 없는 상태인데 확인 한번 해봐.")
 
@@ -674,11 +713,12 @@ def main(train_args: SFTTrainingArguments) -> None:
         tokenizer=tokenizer,
         response_template=train_args.response_template,
         instruction_template=train_args.instruction_template,
-        pack_max_seq=train_args.data_max_length,
+        args=train_args,
         dtype=model.dtype,
     )
 
-    sample_check = collator.torch_call([train_dataset[0]])
+    sample = [[train_dataset[0]]] if train_args.do_packing else [train_dataset[0]]
+    sample_check = collator.torch_call(sample)
     if is_main_process(train_args.local_rank):
         sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
         check_labels = [tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
