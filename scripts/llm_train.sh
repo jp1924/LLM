@@ -1,6 +1,6 @@
-export WANDB_PROJECT="LLM"
-export WANDB_RUN_GROUP='gemma-2-9b/NewOrcaAlpacaChatGPT'
-
+export WANDB_PROJECT=""
+export WANDB_RUN_GROUP=''
+export WANDB_WATCH=""
 
 export TORCH_DISTRIBUTED_DEBUG="DETAIL"
 export TORCHDYNAMO_DISABLE="1"
@@ -9,17 +9,16 @@ export OMP_NUM_THREADS=2
 
 deepspeed --include=localhost:0,1,2,3 --master_port=8532 \
     '/root/workspace/main.py' \
-    --output_dir='/root/output_dir/gemma-2-9b/NewOrcaAlpacaChatGPT/packing-sft' \
-    --cache_dir='/root/.cache/.[gemma-2-9b]preprocess/sft' \
-    --run_name='gemma-2-9b' \
-    --model_name_or_path='google/gemma-2-9b' \
-    --cache_file_name='preprocessor.arrow' \
+    --output_dir='' \
+    --cache_dir='/root/.cache/' \
+    --run_name='' \
+    --model_name_or_path='' \
     --preprocessing_batched=true \
     --preprocessing_num_workers=20 \
     --preprocessing_batch_size=1000 \
     --dataset_repo_ls \
-        'jp1924/NewOrcaAlpacaChatGPT' \
-    --data_name_map='{"jp1924/NewOrcaAlpacaChatGPT": "SFT"}' \
+        '' \
+    --data_name_map='{"": ""}' \
     --train_dataset_prefix='train' \
     --per_device_train_batch_size=12 \
     --gradient_accumulation_steps=1 \
@@ -51,10 +50,8 @@ deepspeed --include=localhost:0,1,2,3 --master_port=8532 \
     --torch_compile=true \
     --gradient_checkpointing=true \
     --gradient_checkpointing_kwargs='{"use_reentrant": false}' \
-    --chat_template="{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>' }}{% if message.role == 'user' %}{{ '### User:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'system' %}{{ '### System:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'assistant' %}{{ '### Assistant:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'text' %}{{ content.text }}{% else %}{# Do nothing #}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{% else %}{{ '' }}{% endif %}{{ '<end_of_turn>' }}{% endfor %}{% if not add_generation_prompt %}{{ eos_token }}{% elif add_generation_prompt %}{{ '<start_of_turn>' }}{{ '### Assistant:\n' }}{% else %}{# Do nothing #}{% endif %}" \
-    --sot_token='<start_of_turn>' \
-    --eot_token='<end_of_turn>' \
-    --response_template="[6176, 18145, 235292, 108]" \
+    --chat_template="" \
+    --response_template="" \
     --padding_side='right' \
     --dataloader_prefetch_factor=5 \
     --dataloader_num_workers=4 \
@@ -65,4 +62,4 @@ deepspeed --include=localhost:0,1,2,3 --master_port=8532 \
     --packing_shuffle=true \
     --group_by_length=false \
     --torch_empty_cache_steps=100 \
-    --deepspeed='/root/workspace/config/ZeRO_2_act_check.json'
+    --deepspeed='/root/workspace/config/ZeRO_3_act_check.json'
