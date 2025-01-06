@@ -107,22 +107,15 @@ class SFTTrainingArguments(TrainingArguments):
         default=None,
         metadata={"help": "The template for generating instructions."},
     )
-    # attn_implementation: str = field(
-    #     default="eager",
-    #     metadata={"help": "The attention implementation to use. Options: 'eager', 'flash_attention_2'."},
-    # )
-    # padding_side: str = field(
-    #     default="right",
-    #     metadata={"help": "The side on which to pad sequences. Options: 'left', 'right'."},
-    # )
     attn_implementation: str = field(
         default="eager",
-        metadata={"help": "The attention implementation to use.", "options": ["eager", "flash_attention_2"]},
+        metadata={"help": "The attention implementation to use. Options: 'eager', 'flash_attention_2'."},
     )
     padding_side: str = field(
         default="right",
-        metadata={"help": "The side on which to pad sequences.", "options": ["left", "right"]},
+        metadata={"help": "The side on which to pad sequences. Options: 'left', 'right'."},
     )
+
     chat_template: str = field(
         default=None,
         metadata={"help": "The template for chat interactions."},
@@ -579,7 +572,7 @@ def main(train_args: SFTTrainingArguments) -> None:
             datasets = load_dataset(repo_name, data_name)
 
             map_cache_file_name, filter_cache_file_name = None, None
-            if train_args.cache_file_name:
+            if train_args.cache_dir is not None:
                 name = repo_name.split("/")[-1]
                 name = f"{name}-{data_name}" if data_name else name
 
