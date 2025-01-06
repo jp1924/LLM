@@ -34,70 +34,110 @@ from transformers.utils import is_datasets_available
 class SFTTrainingArguments(TrainingArguments):
     dataset_repo_ls: List[str] = field(
         default=None,
-        metadata={"help": "The name of the dataset to use (via the datasets library)."},
+        metadata={"help": "The list of dataset repository names to use (via the datasets library)."},
     )
-    data_max_length: int = 2048
-    cache_file_name: Optional[str] = None
-    preprocessing_num_workers: int = 5
-    preprocessing_batch_size: int = 1000
-    preprocessing_batched: bool = True
+    data_max_length: int = field(
+        default=2048,
+        metadata={"help": "The maximum length of the data sequences."},
+    )
 
+    preprocessing_num_workers: int = field(
+        default=5,
+        metadata={"help": "The number of worker processes to use for data preprocessing."},
+    )
+    preprocessing_batch_size: int = field(
+        default=1000,
+        metadata={"help": "The batch size to use for data preprocessing."},
+    )
+    preprocessing_batched: bool = field(
+        default=True,
+        metadata={"help": "Whether to batch the data during preprocessing."},
+    )
     train_dataset_prefix: List[str] = field(
         default="train",
-        metadata={"help": "A prefix required to distinguish splits in the data loaded by load_dataset."},
+        metadata={"help": "A prefix required to distinguish training splits in the data loaded by load_dataset."},
     )
     valid_dataset_prefix: List[str] = field(
         default="validation",
-        metadata={"help": "A prefix required to distinguish splits in the data loaded by load_dataset."},
+        metadata={"help": "A prefix required to distinguish validation splits in the data loaded by load_dataset."},
     )
     test_dataset_prefix: List[str] = field(
         default="eval_other",
-        metadata={"help": "A prefix required to distinguish splits in the data loaded by load_dataset."},
+        metadata={"help": "A prefix required to distinguish test splits in the data loaded by load_dataset."},
     )
     data_truncate_map: Optional[Union[dict, str]] = field(
         default=None,
-        metadata={"help": "A map to truncate part of the data. {'repo_name': {'train': 3000, 'validation': 1500}}."},
+        metadata={
+            "help": "A map to truncate part of the data. Example: {'repo_name': {'train': 3000, 'validation': 1500}}."
+        },
     )
     data_name_map: Optional[Union[dict, str]] = field(
         default=None,
-        metadata={"help": "A map to config_name of the data. {'repo_name': 'data_config_name'"},
+        metadata={"help": "A map to config_name of the data. Example: {'repo_name': 'data_config_name'}."},
     )
     do_data_main_process_first: bool = field(
         default=False,
-        metadata={"help": "main process first"},
+        metadata={"help": "Whether to run data preprocessing on the main process first."},
     )
     profiling: bool = field(
         default=False,
-        metadata={"help": "profiling"},
+        metadata={"help": "Whether to enable profiling during training."},
     )
     sot_token: str = field(
         default="",
-        metadata={"help": "start of text token"},
+        metadata={"help": "The start of text token."},
     )
     eot_token: str = field(
         default="",
-        metadata={"help": "end of text token"},
+        metadata={"help": "The end of text token."},
     )
-    cache_dir: Optional[str] = None
-    model_name_or_path: str = None
-    response_template: str = None
-    instruction_template: str = None
-    attn_implementation: str = "eager"
-    padding_side: str = "right"
-    chat_template: str = None
-    add_bos_token: bool = False
-
+    cache_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "The directory to store the cache files."},
+    )
+    model_name_or_path: str = field(
+        default=None,
+        metadata={"help": "The name or path of the pre-trained model."},
+    )
+    response_template: str = field(
+        default=None,
+        metadata={"help": "The template for generating responses."},
+    )
+    instruction_template: str = field(
+        default=None,
+        metadata={"help": "The template for generating instructions."},
+    )
+    # attn_implementation: str = field(
+    #     default="eager",
+    #     metadata={"help": "The attention implementation to use. Options: 'eager', 'flash_attention_2'."},
+    # )
+    # padding_side: str = field(
+    #     default="right",
+    #     metadata={"help": "The side on which to pad sequences. Options: 'left', 'right'."},
+    # )
+    attn_implementation: str = field(
+        default="eager",
+        metadata={"help": "The attention implementation to use.", "options": ["eager", "flash_attention_2"]},
+    )
+    padding_side: str = field(
+        default="right",
+        metadata={"help": "The side on which to pad sequences.", "options": ["left", "right"]},
+    )
+    chat_template: str = field(
+        default=None,
+        metadata={"help": "The template for chat interactions."},
+    )
     packing_max_elem: int = field(
         default=10,
-        metadata={"help": ""},
+        metadata={"help": "The maximum number of elements to pack together."},
     )
     do_packing: bool = field(
         default=False,
-        metadata={"help": ""},
+        metadata={"help": "Whether to enable packing of sequences."},
     )
     packing_shuffle: bool = field(
         default=True,
-        metadata={"help": "packing shuffle"},
+        metadata={"help": "Whether to shuffle sequences during packing."},
     )
 
     def __post_init__(self):
@@ -112,6 +152,8 @@ class SFTTrainingArguments(TrainingArguments):
         self.test_dataset_prefix = self.test_dataset_prefix if self.test_dataset_prefix else []
 
         self.cache_dir = Path(self.cache_dir) if self.cache_dir else None
+
+        self.model_name_or_path = self.resume_from_checkpoint or self.model_name_or_path
 
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
@@ -380,94 +422,54 @@ class DataPackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
         self.do_packing = args.do_packing
         self.dtype = dtype
 
+    def _create_attention_mask(self, input_length_ls):
+        total_length = sum(input_length_ls)
+        attention_mask = torch.full((1, 1, total_length, total_length), torch.finfo(self.dtype).min)
+
+        start_idx, end_idx = 0, 0
+        for length in input_length_ls:
+            end_idx += length
+            one_tensor = torch.ones((length, length), dtype=torch.float32)
+            mask = torch.tril(one_tensor, diagonal=0).to(dtype=torch.bool)
+            attention_mask[0, 0, start_idx:end_idx, start_idx:end_idx][mask] = 0
+            start_idx = end_idx
+
+        return attention_mask
+
+    def _process_features(self, features_ls):
+        input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
+        for features in features_ls:
+            batch = super().torch_call([features])
+            input_ids, labels = batch.input_ids[0], batch.labels[0]
+            length = len(input_ids)
+
+            labels_ls.append(labels)
+            input_ids_ls.append(input_ids)
+            input_length_ls.append(length)
+            position_ids_ls.append(torch.arange(length))
+
+        return input_ids_ls, labels_ls, position_ids_ls, input_length_ls
+
     def torch_call(self, features_ls):
-        # # 어떤 모델은 pad토큰이 있는 녀석도 있고, 없는 녀석도 있다, 거기에 packing할지 말지에 따라 분기문 만드는건 복잡하다
-        # # 차라리 tokenizer에서 pad 지원하던 말던 상관없이 packing이 된 상태로 입력하자.
-        # if not self.do_packing and self.tokenizer.pad_token_id is not None:
-        #     # NOTE: 이 부분 나중에 flatten 하든 뭘 하든, 일단 수정해야 할 듯.
-        #     batch = super().torch_call(features_ls)
-
         if not self.do_packing:
-            input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
-            for features in features_ls:
-                batch = super().torch_call([features])
-                input_ids, labels = batch.input_ids[0], batch.labels[0]
-                length = len(input_ids)
-
-                labels_ls.append(labels)
-                input_ids_ls.append(input_ids)
-                input_length_ls.append(length)
-                position_ids_ls.append(torch.arange(length))
-
-            total_length = sum(input_length_ls)
-            attention_mask = torch.full((1, 1, total_length, total_length), torch.finfo(self.dtype).min)
-
-            start_idx, end_idx = 0, 0
-            for length in input_length_ls:
-                end_idx += length
-
-                one_tensor = torch.ones((length, length), dtype=torch.float32)
-                mask = torch.tril(one_tensor, diagonal=0).to(dtype=torch.bool)
-                attention_mask[0, 0, start_idx:end_idx, start_idx:end_idx][mask] = 0
-
-                start_idx = end_idx
-
-            # from PIL import Image
-            # Image.fromarray((attention_mask == 0).numpy()[0, 0].astype(np.uint8) * 255, mode="L").save('packing_attention_mask.png')
-            batch = dict()
-            batch["labels"] = torch.concat(labels_ls)[None]
-            batch["input_ids"] = torch.concat(input_ids_ls)[None]
-            batch["position_ids"] = torch.concat(position_ids_ls)[None]
-            batch["attention_mask"] = attention_mask
-
-        elif not self.do_packing and self.attn_implementation == "eager":
+            input_ids_ls, labels_ls, position_ids_ls, input_length_ls = self._process_features(features_ls)
+        elif isinstance(features_ls, list) and isinstance(features_ls[0], list):
             input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
             for packing_ls in features_ls:
-                for pack in packing_ls:
-                    batch = super().torch_call([pack])
-                    input_ids, labels = batch.input_ids[0], batch.labels[0]
-                    length = len(input_ids)
+                ids, labels, positions, lengths = self._process_features(packing_ls)
+                input_ids_ls.extend(ids)
+                labels_ls.extend(labels)
+                position_ids_ls.extend(positions)
+                input_length_ls.extend(lengths)
 
-                    labels_ls.append(labels)
-                    input_ids_ls.append(input_ids)
-                    input_length_ls.append(length)
-                    position_ids_ls.append(torch.arange(length))
+        attention_mask = self._create_attention_mask(input_length_ls)
 
-            total_length = sum(input_length_ls)
-            attention_mask = torch.full((1, 1, total_length, total_length), torch.finfo(self.dtype).min)
-
-            start_idx, end_idx = 0, 0
-            for length in input_length_ls:
-                end_idx += length
-
-                one_tensor = torch.ones((length, length), dtype=torch.float32)
-                mask = torch.tril(one_tensor, diagonal=0).to(dtype=torch.bool)
-                attention_mask[0, 0, start_idx:end_idx, start_idx:end_idx][mask] = 0
-
-                start_idx = end_idx
-
-            # from PIL import Image
-            # Image.fromarray((attention_mask == 0).numpy()[0, 0].astype(np.uint8) * 255, mode="L").save('packing_attention_mask.png')
-            batch = dict()
-            batch["labels"] = torch.concat(labels_ls)[None]
-            batch["input_ids"] = torch.concat(input_ids_ls)[None]
-            batch["position_ids"] = torch.concat(position_ids_ls)[None]
-            batch["attention_mask"] = attention_mask
-        elif self.do_packing and self.attn_implementation == "flash_attention_2":
-            pack_input_ids, pack_labels, pack_position_ids = list(), list(), list()
-            for packing_ls in features_ls:
-                for pack in packing_ls:
-                    batch = super().torch_call([{"input_ids": pack["input_ids"]}])
-                    pack_labels.append(batch.labels[0])
-                    pack_input_ids.append(batch.input_ids[0])
-                    pack_position_ids.append(torch.arange(len(batch.input_ids[0])))
-
-            batch = dict()
-            batch["labels"] = torch.concat(pack_labels)[None]
-            batch["input_ids"] = torch.concat(pack_input_ids)[None]
-            batch["position_ids"] = torch.concat(pack_position_ids)[None]
-        else:
-            raise ValueError("아직 구현 안함")
+        batch = {
+            "labels": torch.concat(labels_ls)[None],
+            "input_ids": torch.concat(input_ids_ls)[None],
+            "position_ids": torch.concat(position_ids_ls)[None],
+            "attention_mask": attention_mask,
+        }
 
         return batch
 
@@ -518,34 +520,75 @@ def main(train_args: SFTTrainingArguments) -> None:
             train_args.length_column_name: finish_length_ls,
         }
 
-    def length_filter(length_ls):
-        return [length <= train_args.data_max_length for length in length_ls]
+    def processing_datasets() -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
+        def length_filter(length_ls: List[int]) -> List[bool]:
+            return [length <= train_args.data_max_length for length in length_ls]
 
-    def prepare_datasets() -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
-        train_dataset_ls, valid_dataset_ls, test_dataset_ls = list(), list(), list()
+        def process_dataset(dataset, dataset_key, repo_name, truncate_map, filter_cache_file_name):
+            original_size = len(dataset)
+            if dataset_key in truncate_map:
+                truncate_size = truncate_map[dataset_key]
+                dataset_size = len(dataset)
+                dataset = dataset if dataset_size <= truncate_size else dataset.shuffle().select(range(truncate_size))
+                if dataset_size <= truncate_size and is_main_process(train_args.local_rank):
+                    logger.info(
+                        f"{repo_name}의 {dataset_key}크기는 {dataset_size}이지만 truncate_size는 {truncate_size} 크기를 조절하셈."
+                    )
+
+            if dataset_key in train_args.train_dataset_prefix and train_args.do_train:
+                dataset = dataset.filter(
+                    length_filter,
+                    num_proc=train_args.preprocessing_num_workers,
+                    input_columns=[train_args.length_column_name],
+                    cache_file_name=filter_cache_file_name[dataset_key],
+                    batched=train_args.preprocessing_batched,
+                    batch_size=train_args.preprocessing_batch_size,
+                    desc=f"length-filtering-{repo_name}/{dataset_key}",
+                )
+                train_dataset_ls.append(dataset)
+
+            if dataset_key in train_args.valid_dataset_prefix and train_args.do_eval:
+                valid_dataset_ls.append(dataset)
+
+            if dataset_key in train_args.test_dataset_prefix and train_args.do_predict:
+                test_dataset_ls.append(dataset)
+
+            if is_main_process(train_args.local_rank):
+                length_ls = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
+                length_ls = [int(length) for length in length_ls]
+                logger.info(f"{repo_name}/{dataset_key}-length: {length_ls}")
+                logger.info(f"{repo_name}/{dataset_key}-size: {original_size} -> {len(dataset)}")
+
+        def concatenate_and_log(datasets_ls, dataset_type):
+            if datasets_ls:
+                dataset = concatenate_datasets(datasets_ls)
+                dataset.set_format("pt")
+                if is_main_process(train_args.local_rank):
+                    logger.info(f"{dataset_type}_dataset:\n{dataset}")
+                return dataset
+            return None
+
         start_time = time.time()
+        train_dataset_ls, valid_dataset_ls, test_dataset_ls = [], [], []
         for repo_name in train_args.dataset_repo_ls:
             if is_main_process(train_args.local_rank):
                 logger.info(f"load-{repo_name}")
 
             data_name = train_args.data_name_map.get(repo_name, None)
             truncate_map = train_args.data_truncate_map.get(repo_name, {})
-
             datasets = load_dataset(repo_name, data_name)
 
-            dataset_original_size = {types: len(datasets[types]) for types in datasets}
             map_cache_file_name, filter_cache_file_name = None, None
             if train_args.cache_file_name:
                 name = repo_name.split("/")[-1]
                 name = f"{name}-{data_name}" if data_name else name
 
                 map_cache_file_name = {
-                    x: train_args.cache_dir.joinpath(f"map_{name}-{x}_{train_args.cache_file_name}").as_posix()
-                    for x in datasets
+                    x: train_args.cache_dir.joinpath(f"map_{name}-{x}_preprocessor.arrow").as_posix() for x in datasets
                 }
                 filter_cache_file_name = {
                     x: train_args.cache_dir.joinpath(
-                        f"filter_{f'{truncate_map[x]}-' if x in truncate_map else ''}{train_args.data_max_length}_{name}-{x}_{train_args.cache_file_name}"
+                        f"filter_{f'{truncate_map[x]}-' if x in truncate_map else ''}{train_args.data_max_length}_{name}-{x}_preprocessor.arrow"
                     ).as_posix()
                     for x in datasets
                 }
@@ -562,65 +605,13 @@ def main(train_args: SFTTrainingArguments) -> None:
             )
 
             for dataset_key in datasets:
-                dataset, original_size = datasets[dataset_key], dataset_original_size[dataset_key]
-                if dataset_key in truncate_map:
-                    truncate_size, dataset_size = truncate_map[dataset_key], len(dataset)
-                    dataset = (
-                        dataset  # 데이터가 너무 작은 경우
-                        if dataset_size <= truncate_size
-                        else dataset.shuffle().select(range(truncate_size))  # 데이터가 큰 경우
-                    )
-                    if dataset_size <= truncate_size and is_main_process(train_args.local_rank):
-                        logger.info(
-                            f"{repo_name}의 {dataset_key}크기는 {dataset_size}이지만"
-                            f"truncate_size는 {truncate_size} 크기를 조절하셈."
-                        )
+                process_dataset(datasets[dataset_key], dataset_key, repo_name, truncate_map, filter_cache_file_name)
 
-                if dataset_key in train_args.train_dataset_prefix and train_args.do_train:
-                    dataset = dataset.filter(
-                        length_filter,
-                        num_proc=train_args.preprocessing_num_workers,
-                        input_columns=[train_args.length_column_name],
-                        cache_file_name=filter_cache_file_name[dataset_key],
-                        batched=train_args.preprocessing_batched,
-                        batch_size=train_args.preprocessing_batch_size,
-                        desc=f"length-filtering-{repo_name}/{dataset_key}",
-                    )
-
-                    train_dataset_ls.append(dataset)
-
-                if dataset_key in train_args.valid_dataset_prefix and train_args.do_eval:
-                    valid_dataset_ls.append(dataset)
-
-                if dataset_key in train_args.test_dataset_prefix and train_args.do_predict:
-                    test_dataset_ls.append(dataset)
-
-                if is_main_process(train_args.local_rank):
-                    length_ls = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
-                    length_ls = [int(length) for length in length_ls]
-                    logger.info(f"{repo_name}/{dataset_key}-length: {length_ls}")
-                    logger.info(f"{repo_name}/{dataset_key}-size: {original_size} -> {len(dataset)}")
-
-        train_dataset = None
-        if train_dataset_ls:
-            train_dataset = concatenate_datasets(train_dataset_ls)
-            train_dataset.set_format("pt")
-            if is_main_process(train_args.local_rank):
-                logger.info(f"train_dataset:\n{train_dataset}")
-
-        valid_dataset = None
-        if valid_dataset_ls:
-            valid_dataset = concatenate_datasets(valid_dataset_ls)
-            valid_dataset.set_format("pt")
-            if is_main_process(train_args.local_rank):
-                logger.info(f"valid_dataset:\n{valid_dataset}")
-
-        test_dataset = None
-        if test_dataset_ls:
-            test_dataset = concatenate_datasets(test_dataset_ls)
-            test_dataset.set_format("pt")
-            if is_main_process(train_args.local_rank):
-                logger.info(f"test_dataset:\n{test_dataset}")
+        train_dataset, valid_dataset, test_dataset = (
+            concatenate_and_log(train_dataset_ls, "train"),
+            concatenate_and_log(valid_dataset_ls, "valid"),
+            concatenate_and_log(test_dataset_ls, "test"),
+        )
 
         sample_dataset = train_dataset or valid_dataset or test_dataset
         if sample_dataset and is_main_process(train_args.local_rank):
@@ -644,7 +635,6 @@ def main(train_args: SFTTrainingArguments) -> None:
                     )
             else:
                 logger.warning("instruction_template이 없음. 근데 애러는 발생하지 않고 그냥 패스함.")
-
         elif sample_dataset is None:
             logger.warning("train, valid, test데이터가 전혀 없는 상태인데 확인 한번 해봐.")
 
@@ -652,16 +642,11 @@ def main(train_args: SFTTrainingArguments) -> None:
         if is_main_process(train_args.local_rank):
             logger.info(f"load_dataset_time: {end_time - start_time:.2f}")
 
-        return (train_dataset, valid_dataset, test_dataset)
+        return train_dataset, valid_dataset, test_dataset
 
-    model_name_or_path = train_args.resume_from_checkpoint or train_args.model_name_or_path
+    tokenizer = AutoTokenizer.from_pretrained(train_args.model_name_or_path, padding_side=train_args.padding_side)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name_or_path,
-        padding_side=train_args.padding_side,
-        add_bos_token=train_args.add_bos_token,
-    )
-
+    # NOTE: add bos, eos token이 있는녀석이 있고 없는 녀석이 있음.
     check_input_ids = tokenizer("안녕하세요").input_ids
     add_bos_token = check_input_ids[0] == tokenizer.bos_token_id
     if not add_bos_token and is_main_process(train_args.local_rank):
@@ -682,14 +667,14 @@ def main(train_args: SFTTrainingArguments) -> None:
         tokenizer.chat_template = train_args.chat_template
 
     config = AutoConfig.from_pretrained(
-        model_name_or_path,
+        train_args.model_name_or_path,
         use_cache=False,
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
         attn_implementation=train_args.attn_implementation,
     )
-    model = AutoModelForCausalLM.from_pretrained(model_name_or_path, config=config)
+    model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, config=config)
 
     if train_args.torch_compile:
         model = torch.compile(
@@ -707,7 +692,7 @@ def main(train_args: SFTTrainingArguments) -> None:
     )
     with context:
         # load datasets
-        train_dataset, valid_dataset, test_dataset = prepare_datasets()
+        train_dataset, valid_dataset, test_dataset = processing_datasets()
 
     collator = DataPackingCollatorForCompletionOnlyLM(
         tokenizer=tokenizer,
@@ -717,8 +702,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         dtype=model.dtype,
     )
 
-    sample = [[train_dataset[0]]] if train_args.do_packing else [train_dataset[0]]
-    sample_check = collator.torch_call(sample)
+    sample_check = collator.torch_call([train_dataset[0]])
     if is_main_process(train_args.local_rank):
         sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
         check_labels = [tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
@@ -730,6 +714,11 @@ def main(train_args: SFTTrainingArguments) -> None:
 
     if tokenizer.eos_token_ids not in sample_check["input_ids"].tolist()[0]:
         raise ValueError("EOS token이 없다. 이거 다시 전처리 해라.")
+
+    if train_args.lr_scheduler_type == "better_cosine":
+        from optimizer import get_better_cosine_schedule_with_warmup
+
+        raise NotImplementedError("아직 구현 안함.")
 
     trainer = PackingTrainer(
         model=model,
