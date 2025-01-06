@@ -695,7 +695,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         dtype=model.dtype,
     )
 
-    sample_check = collator.torch_call([train_dataset[0]])
+    sample_check = collator.torch_call([[train_dataset[0]]] if train_args.do_packing else [train_dataset[0]])
     if is_main_process(train_args.local_rank):
         sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
         check_labels = [tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
