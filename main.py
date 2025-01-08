@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import time
 from collections import defaultdict
@@ -20,8 +21,9 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     HfArgumentParser,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
     Trainer,
-    TrainingArguments,
     set_seed,
 )
 from transformers import logging as hf_logging
@@ -31,7 +33,7 @@ from transformers.utils import is_datasets_available
 
 
 @dataclass
-class SFTTrainingArguments(TrainingArguments):
+class SFTTrainingArguments(Seq2SeqTrainingArguments):
     dataset_repo_ls: List[str] = field(
         default=None,
         metadata={"help": "The list of dataset repository names to use (via the datasets library)."},
@@ -133,6 +135,19 @@ class SFTTrainingArguments(TrainingArguments):
         metadata={"help": "Whether to shuffle sequences during packing."},
     )
 
+    do_logic_kor_at_save: bool = field(
+        default=False,
+        metadata={"help": "Whether to enable logic_kor evaluation at each save."},
+    )
+    judge_model: str = field(
+        default=None,
+        metadata={"help": "The name or path of the judge model."},
+    )
+    judge_repeat_num: int = field(
+        default=5,
+        metadata={"help": "The number of times to repeat the evaluation."},
+    )
+
     def __post_init__(self):
         super().__post_init__()
         self.data_truncate_map = json.loads(self.data_truncate_map) if self.data_truncate_map else {}
@@ -150,6 +165,16 @@ class SFTTrainingArguments(TrainingArguments):
 
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
+
+        if self.do_logic_kor_at_save:
+            if self.judge_model is None:
+                raise ValueError("judge_model이 없음. 다시 설정하셈.")
+
+            if os.getenv("OPENAI_API_KEY", None) is None:
+                raise ValueError("OPENAI_API_KEY가 없음. 다시 설정하셈.")
+
+            if self.report_to is not None and "wandb" not in self.report_to:
+                raise ValueError("do_logic_kor_at_save에선 wandb만 지원함. 다시 설정하셈.")
 
 
 class PackingSampler(Sampler):
@@ -713,6 +738,14 @@ def main(train_args: SFTTrainingArguments) -> None:
 
         raise NotImplementedError("아직 구현 안함.")
 
+    callbacks = None
+    if train_args.do_logic_kor_at_save:
+        from callbacks import LogicKorCallback
+
+        callbacks = [LogicKorCallback()]
+
+        logger.info("아직 구현중인 기능\n" * 10)
+
     trainer = PackingTrainer(
         model=model,
         train_dataset=train_dataset,
@@ -720,7 +753,9 @@ def main(train_args: SFTTrainingArguments) -> None:
         processing_class=tokenizer,
         data_collator=collator,
         args=train_args,
+        callbacks=callbacks,
     )
+    del model
 
     if train_args.do_train and train_dataset:
         train(trainer, train_args)
