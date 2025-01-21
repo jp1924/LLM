@@ -1,0 +1,6 @@
+__pycache__
+.cache
+.bash_history
+.vscode-server
+.python_history
+others
