@@ -5,10 +5,9 @@
     "zero_optimization": {
         "stage": 2,
         "allgather_partitions": true,
-        "allgather_bucket_size": 5e7,
         "overlap_comm": false,
         "reduce_scatter": true,
-        "reduce_bucket_size": 5e7,
+        "reduce_bucket_size": "auto",
         "contiguous_gradients": true,
         "stage3_gather_16bit_weights_on_model_save": true
     },
