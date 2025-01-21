@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from pathlib import Path
 from time import sleep
@@ -23,6 +24,7 @@ from transformers import (
     TrainerState,
     TrainingArguments,
 )
+from transformers import logging as hf_logging
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
@@ -1040,6 +1042,10 @@ def rewrite_logs(d):
     return new_d
 
 
+hf_logging.set_verbosity_info()
+logger = hf_logging.get_logger("transformers")
+
+
 class LogicKorCallback(TrainerCallback):
     def _wait_gather_object(self, obj: Optional[list] = None) -> Any:
         """
@@ -1230,3 +1236,67 @@ class LogicKorCallback(TrainerCallback):
         processing_class.padding_side = "right"
         model.train()
         return
+
+
+class LMEvalHarnessCallback(TrainerCallback):
+    def __init__(self, args: TrainingArguments):
+        self.tasknames = self.get_task_ls(args)
+
+    def get_task_ls(args: TrainingArguments) -> List[str]:
+        from lm_eval import utils
+        from lm_eval.tasks import TaskManager
+
+        # NOTE: include-path는 따로 뻄.
+        task_manager = TaskManager(args.log_level)
+
+        if args.tasks is None or args.tasks in ["list", "list_groups", "list_tags", "list_subtasks"]:
+            raise ValueError("No tasks specified. Please pass a task name or a path to a task file.")
+        else:
+            task_path = Path(args.tasks)
+            if task_path.is_dir():
+                task_names = []
+                for yaml_file in task_path.glob("*.yaml"):
+                    config = utils.load_yaml_config(yaml_file)
+                    task_names.append(config)
+            else:
+                task_list = args.tasks.split(",")
+                task_names = task_manager.match_tasks(task_list)
+                for task in [task for task in task_list if task not in task_names]:
+                    if os.path.isfile(task):
+                        config = utils.load_yaml_config(task)
+                        task_names.append(config)
+                task_missing = [
+                    task for task in task_list if task not in task_names and "*" not in task
+                ]  # we don't want errors if a wildcard ("*") task name was used
+
+                if task_missing:
+                    missing = ", ".join(task_missing)
+                    logger.error(f"Tasks were not found: {missing}\n")
+                    raise ValueError(
+                        f"Tasks not found: {missing}. Try `lm-eval --tasks {{list_groups,list_subtasks,list_tags,list}}` to list out all available names for task groupings; only (sub)tasks; tags; or all of the above, or pass '--verbosity DEBUG' to troubleshoot task registration issues."
+                    )
+        return task_list
+
+    def on_save(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        model: PreTrainedModel,
+        processing_class: PreTrainedTokenizer,
+        **kwargs,
+    ):
+        from lm_eval import simple_evaluate
+        from lm_eval.models.huggingface import HFLM
+
+        lm = HFLM(model)
+        simple_evaluate(
+            model=lm,
+            tasks=self.tasknames,
+            num_fewshot=args.num_fewshot,
+            batch_size=args.eval_batch_size,
+            device=model.device,
+            use_cache=args.use_cache,
+            apply_chat_template=args.apply_chat_template,
+        )
+        return super().on_save(args, state, control, **kwargs)

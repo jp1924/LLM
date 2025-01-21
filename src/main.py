@@ -1,16 +1,16 @@
 import json
-import os
 import random
 import time
 from collections import defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from accelerate import ProfileKwargs
+from data_preprocessor import default_preprocessor
 from datasets import Dataset, concatenate_datasets, load_dataset
 from setproctitle import setproctitle
 from torch.utils.data import DataLoader, RandomSampler, Sampler
@@ -21,22 +21,26 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     HfArgumentParser,
-    Seq2SeqTrainer,
+    PreTrainedTokenizer,
     Seq2SeqTrainingArguments,
     Trainer,
     set_seed,
 )
 from transformers import logging as hf_logging
-from transformers.trainer_pt_utils import LengthGroupedSampler
-from transformers.trainer_utils import has_length, is_main_process, seed_worker
-from transformers.utils import is_datasets_available
+from transformers.trainer_pt_utils import LengthGroupedSampler, get_model_param_count
+from transformers.trainer_utils import has_length, seed_worker
+from transformers.utils import is_datasets_available, is_sagemaker_mp_enabled
 
 
 @dataclass
-class SFTTrainingArguments(Seq2SeqTrainingArguments):
+class DataPipelineArguments:
     dataset_repo_ls: List[str] = field(
         default=None,
         metadata={"help": "The list of dataset repository names to use (via the datasets library)."},
+    )
+    data_preprocessor_type: str = field(
+        default=None,
+        metadata={"help": "preprocessor type"},
     )
     data_max_length: int = field(
         default=2048,
@@ -81,21 +85,17 @@ class SFTTrainingArguments(Seq2SeqTrainingArguments):
         default=False,
         metadata={"help": "Whether to run data preprocessing on the main process first."},
     )
-    profiling: bool = field(
-        default=False,
-        metadata={"help": "Whether to enable profiling during training."},
-    )
-    sot_token: str = field(
-        default="",
-        metadata={"help": "The start of text token."},
-    )
-    eot_token: str = field(
-        default="",
-        metadata={"help": "The end of text token."},
-    )
     cache_dir: Optional[str] = field(
         default=None,
         metadata={"help": "The directory to store the cache files."},
+    )
+
+
+@dataclass
+class TrainPipelineArguments:
+    profiling: bool = field(
+        default=False,
+        metadata={"help": "Whether to enable profiling during training."},
     )
     model_name_or_path: str = field(
         default=None,
@@ -117,7 +117,6 @@ class SFTTrainingArguments(Seq2SeqTrainingArguments):
         default="right",
         metadata={"help": "The side on which to pad sequences. Options: 'left', 'right'."},
     )
-
     chat_template: str = field(
         default=None,
         metadata={"help": "The template for chat interactions."},
@@ -134,7 +133,26 @@ class SFTTrainingArguments(Seq2SeqTrainingArguments):
         default=True,
         metadata={"help": "Whether to shuffle sequences during packing."},
     )
+    config_kwargs: Dict = field(
+        default="{}",
+        metadata={"help": ""},
+    )
+    model_kwargs: str = field(
+        default="{}",
+        metadata={"help": ""},
+    )
+    tokenizer_kwargs: str = field(
+        default="{}",
+        metadata={"help": ""},
+    )
+    freeze_named_param: List[str] = field(
+        default=None,
+        metadata={"help": "freeze_named_param"},
+    )
 
+
+@dataclass
+class EvalPipelineArguments:
     do_logic_kor_at_save: bool = field(
         default=False,
         metadata={"help": "Whether to enable logic_kor evaluation at each save."},
@@ -148,33 +166,98 @@ class SFTTrainingArguments(Seq2SeqTrainingArguments):
         metadata={"help": "The number of times to repeat the evaluation."},
     )
 
+
+@dataclass
+class SFTTrainingArguments(
+    Seq2SeqTrainingArguments,
+    DataPipelineArguments,
+    TrainPipelineArguments,
+    EvalPipelineArguments,
+):
     def __post_init__(self):
         super().__post_init__()
-        self.data_truncate_map = json.loads(self.data_truncate_map) if self.data_truncate_map else {}
-        self.data_name_map = json.loads(self.data_name_map) if self.data_name_map else {}
-        self.response_template = json.loads(self.response_template) if self.response_template else None
-        self.instruction_template = json.loads(self.instruction_template) if self.instruction_template else None
 
-        self.train_dataset_prefix = self.train_dataset_prefix if self.train_dataset_prefix else []
-        self.valid_dataset_prefix = self.valid_dataset_prefix if self.valid_dataset_prefix else []
-        self.test_dataset_prefix = self.test_dataset_prefix if self.test_dataset_prefix else []
+        def _convert_str_dict(passed_value: dict):
+            "Safely checks that a passed value is a dictionary and converts any string values to their appropriate types."
+            for key, value in passed_value.items():
+                if isinstance(value, dict):
+                    passed_value[key] = _convert_str_dict(value)
+                elif isinstance(value, str):
+                    # First check for bool and convert
+                    if value.lower() in ("true", "false"):
+                        passed_value[key] = value.lower() == "true"
+                    # Check for digit
+                    elif value.isdigit():
+                        passed_value[key] = int(value)
+                    elif value.replace(".", "", 1).isdigit():
+                        passed_value[key] = float(value)
+
+            return passed_value
+
+        _ADDITIONAL_VALID_DICT_FILEDS = [
+            "data_truncate_map",
+            "data_name_map",
+            "config_kwargs",
+            "model_kwargs",
+            "tokenizer_kwargs",
+        ]
+        _VALID_LIST_FIELDS = [
+            "instruction_template",
+            "response_template",
+            "train_dataset_prefix",
+            "valid_dataset_prefix",
+            "test_dataset_prefix",
+            "freeze_named_param",
+        ]
+
+        # copied from: transformers/training_args.py/__post_init__()
+        for field in _ADDITIONAL_VALID_DICT_FILEDS:
+            passed_value = getattr(self, field)
+            # We only want to do this if the str starts with a bracket to indiciate a `dict`
+            # else its likely a filename if supported
+            if isinstance(passed_value, str) and passed_value.startswith("{"):
+                loaded_dict = json.loads(passed_value)
+                # Convert str values to types if applicable
+                loaded_dict = _convert_str_dict(loaded_dict)
+                setattr(self, field, loaded_dict)
+            elif isinstance(passed_value, dict) or passed_value is None:
+                pass
+            else:
+                raise ValueError(f"{field}은 dict로 설정해야 함.")
+
+        for field in _VALID_LIST_FIELDS:
+            passed_value = getattr(self, field)
+            if isinstance(passed_value, str) and passed_value.startswith("["):
+                loaded_list = json.loads(passed_value)
+                setattr(self, field, loaded_list)
+            elif isinstance(passed_value, list) or passed_value is None:
+                pass
+            else:
+                raise ValueError(f"{field}은 list로 설정해야 함.")
+
+        self.config_kwargs = {
+            **self.config_kwargs,
+            "attn_implementation": self.attn_implementation,
+        }
 
         self.cache_dir = Path(self.cache_dir) if self.cache_dir else None
-
         self.model_name_or_path = self.resume_from_checkpoint or self.model_name_or_path
 
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
-        if self.do_logic_kor_at_save:
-            if self.judge_model is None:
-                raise ValueError("judge_model이 없음. 다시 설정하셈.")
+    @property
+    def is_local_process_zero(self) -> bool:
+        return self.local_process_index == 0
 
-            if os.getenv("OPENAI_API_KEY", None) is None:
-                raise ValueError("OPENAI_API_KEY가 없음. 다시 설정하셈.")
+    @property
+    def is_world_process_zero(self) -> bool:
+        if is_sagemaker_mp_enabled():
+            import smdistributed.modelparallel.torch as smp  # type: ignore
 
-            if self.report_to is not None and "wandb" not in self.report_to:
-                raise ValueError("do_logic_kor_at_save에선 wandb만 지원함. 다시 설정하셈.")
+            return smp.rank() == 0
+        else:
+            return self.process_index == 0
 
 
 class PackingSampler(Sampler):
@@ -469,9 +552,9 @@ class DataPackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
         return input_ids_ls, labels_ls, position_ids_ls, input_length_ls
 
     def torch_call(self, features_ls):
-        if not self.do_packing:
+        if isinstance(features_ls[0], dict):
             input_ids_ls, labels_ls, position_ids_ls, input_length_ls = self._process_features(features_ls)
-        elif isinstance(features_ls, list) and isinstance(features_ls[0], list):
+        elif isinstance(features_ls[0], list):
             input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
             for packing_ls in features_ls:
                 ids, labels, positions, lengths = self._process_features(packing_ls)
@@ -497,65 +580,21 @@ logger = hf_logging.get_logger("transformers")
 
 
 def main(train_args: SFTTrainingArguments) -> None:
-    def preprocessor(example):
-        finish_input_id_ls, finish_length_ls = list(), list()
-        for conversations in example["conversations"]:
-            text = tokenizer.apply_chat_template(
-                conversations,
-                tokenize=False,
-                eot_token=train_args.eot_token,
-                sot_token=train_args.sot_token,
-            )
-            is_multi_turn = len(conversations) > 2
-
-            if tokenizer.bos_token not in text and not add_bos_token:
-                text = f"{tokenizer.bos_token}{text}"
-            elif not is_multi_turn and add_bos_token and text.startswith(tokenizer.bos_token):
-                logger.warning_once(
-                    "tokenizing하면서 bos토큰을 자동으로 추가해 주는데, chat_template 적용하면서 bos토큰이 자동으로 추가됨. 따라서 chat_template을 통해 추가된 bos토큰은 필터링 함."
-                )
-                text = text.replace(tokenizer.bos_token, "")
-            elif is_multi_turn and add_bos_token and text.endswith(tokenizer.bos_token):
-                raise ValueError("아직 구현 안함.")
-
-            if tokenizer.eos_token not in text and not add_eos_token:
-                text = f"{text}{tokenizer.eos_token}"
-            elif not is_multi_turn and add_eos_token and text.endswith(tokenizer.eos_token):
-                logger.warning_once(
-                    "tokenizing하면서 eos토큰을 자동으로 추가해 주는데, chat_template 적용하면서 eos토큰이 자동으로 추가됨. 따라서 chat_template을 통해 추가된 eos토큰은 필터링 함."
-                )
-                text = text.replace(tokenizer.eos_token, "")
-            elif is_multi_turn and add_eos_token and text.endswith(tokenizer.eos_token):
-                raise ValueError("아직 구현 안함.")
-
-            outputs = tokenizer(text, return_tensors="np", return_length=True)
-
-            finish_input_id_ls.extend(outputs.input_ids)
-            finish_length_ls.extend(outputs.length)
-
-        return {
-            "input_ids": finish_input_id_ls,
-            train_args.length_column_name: finish_length_ls,
-        }
-
-    def processing_datasets() -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
-        def length_filter(length_ls: List[int]) -> List[bool]:
-            return [length <= train_args.data_max_length for length in length_ls]
-
+    def processing_datasets(func: Callable) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
         def process_dataset(dataset, dataset_key, repo_name, truncate_map, filter_cache_file_name):
             original_size = len(dataset)
             if dataset_key in truncate_map:
                 truncate_size = truncate_map[dataset_key]
                 dataset_size = len(dataset)
                 dataset = dataset if dataset_size <= truncate_size else dataset.shuffle().select(range(truncate_size))
-                if dataset_size <= truncate_size and is_main_process(train_args.local_rank):
+                if dataset_size <= truncate_size and train_args.is_world_process_zero:
                     logger.info(
                         f"{repo_name}의 {dataset_key}크기는 {dataset_size}이지만 truncate_size는 {truncate_size} 크기를 조절하셈."
                     )
 
             if dataset_key in train_args.train_dataset_prefix and train_args.do_train:
                 dataset = dataset.filter(
-                    length_filter,
+                    lambda length_ls: [length <= train_args.data_max_length for length in length_ls],  # type: ignore
                     num_proc=train_args.preprocessing_num_workers,
                     input_columns=[train_args.length_column_name],
                     cache_file_name=filter_cache_file_name[dataset_key],
@@ -571,7 +610,7 @@ def main(train_args: SFTTrainingArguments) -> None:
             if dataset_key in train_args.test_dataset_prefix and train_args.do_predict:
                 test_dataset_ls.append(dataset)
 
-            if is_main_process(train_args.local_rank):
+            if train_args.is_world_process_zero:
                 length_ls = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
                 length_ls = [int(length) for length in length_ls]
                 logger.info(f"{repo_name}/{dataset_key}-length: {length_ls}")
@@ -581,7 +620,7 @@ def main(train_args: SFTTrainingArguments) -> None:
             if datasets_ls:
                 dataset = concatenate_datasets(datasets_ls)
                 dataset.set_format("pt")
-                if is_main_process(train_args.local_rank):
+                if train_args.is_world_process_zero:
                     logger.info(f"{dataset_type}_dataset:\n{dataset}")
                 return dataset
             return None
@@ -589,7 +628,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         start_time = time.time()
         train_dataset_ls, valid_dataset_ls, test_dataset_ls = [], [], []
         for repo_name in train_args.dataset_repo_ls:
-            if is_main_process(train_args.local_rank):
+            if train_args.is_world_process_zero:
                 logger.info(f"load-{repo_name}")
 
             data_name = train_args.data_name_map.get(repo_name, None)
@@ -612,7 +651,7 @@ def main(train_args: SFTTrainingArguments) -> None:
                 }
 
             datasets = datasets.map(
-                preprocessor,
+                func,
                 num_proc=train_args.preprocessing_num_workers,
                 load_from_cache_file=True,
                 batched=train_args.preprocessing_batched,
@@ -620,6 +659,7 @@ def main(train_args: SFTTrainingArguments) -> None:
                 batch_size=train_args.preprocessing_batch_size,
                 remove_columns=set(sum(datasets.column_names.values(), [])),
                 desc=f"preprocess-{repo_name}",
+                fn_kwargs={"tokenizer": tokenizer, "args": train_args},
             )
 
             for dataset_key in datasets:
@@ -632,7 +672,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         )
 
         sample_dataset = train_dataset or valid_dataset or test_dataset
-        if sample_dataset and is_main_process(train_args.local_rank):
+        if sample_dataset and train_args.is_world_process_zero:
             formated_instruct = tokenizer.decode(sample_dataset[0]["input_ids"], skip_special_tokens=False)
             logger.info(f"formated_instruct: {formated_instruct}")
 
@@ -657,42 +697,90 @@ def main(train_args: SFTTrainingArguments) -> None:
             logger.warning("train, valid, test데이터가 전혀 없는 상태인데 확인 한번 해봐.")
 
         end_time = time.time()
-        if is_main_process(train_args.local_rank):
+        if train_args.is_world_process_zero:
             logger.info(f"load_dataset_time: {end_time - start_time:.2f}")
 
         return train_dataset, valid_dataset, test_dataset
 
-    tokenizer = AutoTokenizer.from_pretrained(train_args.model_name_or_path, padding_side=train_args.padding_side)
+    def check_tokenizer(tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
+        # copied from: transformers/models/llama/tokenization_llama.py:LlamaTokenizer:build_inputs_with_special_tokens()
+        def build_inputs_with_special_tokens(tokenizer, token_ids_0, token_ids_1=None):
+            bos_token_id = [tokenizer.bos_token_id] if tokenizer.add_bos_token else []
+            eos_token_id = [tokenizer.eos_token_id] if tokenizer.add_eos_token else []
 
-    # NOTE: add bos, eos token이 있는녀석이 있고 없는 녀석이 있음.
-    check_input_ids = tokenizer("안녕하세요").input_ids
-    add_bos_token = check_input_ids[0] == tokenizer.bos_token_id
-    if not add_bos_token and is_main_process(train_args.local_rank):
-        logger.warning(
-            "tokenizer에 add_bos_token이 False로 되어 있음. 전처리 시, bos토큰이 삽입되지 않을 가능성이 있음."
-        )
+            output = bos_token_id + token_ids_0 + eos_token_id
 
-    add_eos_token = check_input_ids[-1] == tokenizer.eos_token_id
-    if not add_eos_token and is_main_process(train_args.local_rank):
-        logger.warning(
-            "tokenizer에 add_eos_token이 False로 되어 있음. 전처리 시, eos토큰이 삽입되지 않을 가능성이 있음."
-        )
+            if token_ids_1 is not None:
+                output = output + bos_token_id + token_ids_1 + eos_token_id
 
-    if train_args.chat_template:
-        logger.info(
-            f"기존 tokenizer의 chat_template이 {tokenizer.chat_template} 이었음. 이걸 {train_args.chat_template}로 바꿈,"
-        )
-        tokenizer.chat_template = train_args.chat_template
+            return output
 
-    config = AutoConfig.from_pretrained(
-        train_args.model_name_or_path,
-        use_cache=False,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-        attn_implementation=train_args.attn_implementation,
-    )
-    model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, config=config)
+        input_ids = tokenizer("안녕하세요").input_ids
+        bos_token_id, eos_token_id = tokenizer.bos_token_id, tokenizer.eos_token_id
+        bos_token, eos_token = tokenizer.bos_token, tokenizer.eos_token
+        is_add_bos, is_add_eos = input_ids[0] == bos_token_id, input_ids[-1] == eos_token_id
+
+        if train_args.chat_template:
+            tokenizer.chat_template = train_args.chat_template
+            logger.info(f"chat_template: {train_args.chat_template}")
+
+        user_chat = {"role": "user", "content": "Hello, how are you?"}
+        assistant_chat = {"role": "assistant", "content": "I'm fine, thank you."}
+        text = tokenizer.apply_chat_template([user_chat, assistant_chat], tokenize=False)
+
+        msg = ""
+        if not is_add_bos:
+            msg += "tokenizer에 add_bos_token이 False로 되어 있음. 전처리 시, bos토큰이 삽입되지 않을 가능성이 있음.\n"
+        if is_add_bos and bos_token in text:
+            msg += "chat_template과 tokenizer에서 자동으로 bos추가해서 중복되어 들어갈 가능성이 있다.\n"
+            is_add_bos = False
+
+        if not is_add_eos:
+            msg += "tokenizer에 add_eos_token이 False로 되어 있음. 전처리 시, eos토큰이 삽입되지 않을 가능성이 있음.\n"
+        if is_add_eos and eos_token in text:
+            msg += "chat_template과 tokenizer에서 자동으로 eos추가해서 중복되어 들어갈 가능성이 있다.\n"
+            is_add_bos = False
+
+        if train_args.is_world_process_zero:
+            logger.warning(msg.strip())
+
+        setattr(tokenizer, "add_bos_token", is_add_bos)
+        setattr(tokenizer, "add_eos_token", is_add_eos)
+
+        # TODO: 기존에 존재하던 build_inputs_with_special_tokens까지 덮어 씌어비리는 문제가 있다. 이거 나중에 채크해서 수정해야 할 듯.
+        setattr(tokenizer, "build_inputs_with_special_tokens", build_inputs_with_special_tokens)
+
+        return tokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
+    config_kwargs = {
+        **train_args.config_kwargs,
+        "bos_token_id": tokenizer.bos_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "pad_token_id": tokenizer.pad_token_id,
+    }
+    config = AutoConfig.from_pretrained(train_args.model_name_or_path, **config_kwargs)
+    model_kwargs = {"config": config, **train_args.model_kwargs}
+    model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
+
+    tokenizer = check_tokenizer(tokenizer)
+
+    if train_args.freeze_named_param:
+        freeze_param_ls = [param for name, param in model.named_parameters() if name in train_args.freeze_named_param]
+        if not freeze_param_ls:
+            raise ValueError("freeze_named_param에 해당하는 모듈이 없음.")
+
+        for param in freeze_param_ls:
+            param.requires_grad = False
+
+        if train_args.is_world_process_zero:
+            full_param_num = get_model_param_count(model, trainable_only=False)
+            alive_param_num = get_model_param_count(model, trainable_only=True)
+            dead_param_num = full_param_num - alive_param_num
+
+            logger.info(
+                f"얼린 파라미터 수: {dead_param_num}, 활성화된 파라미터 수: {alive_param_num}, 전체 파라미터 수: {full_param_num}"
+            )
 
     if train_args.torch_compile:
         model = torch.compile(
@@ -702,6 +790,10 @@ def main(train_args: SFTTrainingArguments) -> None:
             fullgraph=True,
         )
 
+    match train_args.data_preprocessor_type:
+        case "default":
+            preprocessor_func = default_preprocessor
+
     # load datasets
     context = (
         train_args.main_process_first(desc="main_process_first")
@@ -710,7 +802,7 @@ def main(train_args: SFTTrainingArguments) -> None:
     )
     with context:
         # load datasets
-        train_dataset, valid_dataset, test_dataset = processing_datasets()
+        train_dataset, valid_dataset, test_dataset = processing_datasets(preprocessor_func)
 
     collator = DataPackingCollatorForCompletionOnlyLM(
         tokenizer=tokenizer,
@@ -721,7 +813,7 @@ def main(train_args: SFTTrainingArguments) -> None:
     )
 
     sample_check = collator.torch_call([[train_dataset[0]]] if train_args.do_packing else [train_dataset[0]])
-    if is_main_process(train_args.local_rank):
+    if train_args.is_world_process_zero:
         sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
         check_labels = [tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
         check_labels = ", ".join(check_labels)
@@ -734,7 +826,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         raise ValueError("EOS token이 없다. 이거 다시 전처리 해라.")
 
     if train_args.lr_scheduler_type == "better_cosine":
-        from optimizer import get_better_cosine_schedule_with_warmup
+        from optimization import get_better_cosine_schedule_with_warmup
 
         raise NotImplementedError("아직 구현 안함.")
 
@@ -755,7 +847,6 @@ def main(train_args: SFTTrainingArguments) -> None:
         args=train_args,
         callbacks=callbacks,
     )
-    del model
 
     if train_args.do_train and train_dataset:
         train(trainer, train_args)
@@ -792,7 +883,7 @@ if "__main__" in __name__:
     parser = HfArgumentParser([SFTTrainingArguments])
     train_args, remain_args = parser.parse_args_into_dataclasses(return_remaining_strings=True)
 
-    if remain_args and is_main_process(train_args.local_rank):
+    if remain_args and train_args.is_world_process_zero:
         logger.info(f"remain_args: {remain_args}")
 
     if train_args.seed is not None:
