@@ -3,14 +3,14 @@ import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, List, Literal, Optional, Tuple, Union
 
 import torch
 from accelerate import ProfileKwargs
-from data_preprocessor import default_preprocessor
+from data_preprocessor import pretrain_processor, sft_processor
 from datasets import Dataset, concatenate_datasets, load_dataset
 from setproctitle import setproctitle
-from trainer import DataPackingCollatorForCompletionOnlyLM, PackingTrainer
+from trainer import PackingCollatorForCompletionOnlyLM, PackingTrainer
 
 from transformers import (
     AutoConfig,
@@ -29,10 +29,10 @@ from transformers.utils import is_sagemaker_mp_enabled
 @dataclass
 class DataPipelineArguments:
     dataset_repo_ls: List[str] = field(
-        default=None,
+        default_factory=list,
         metadata={"help": "The list of dataset repository names to use (via the datasets library)."},
     )
-    data_preprocessor_type: str = field(
+    data_preprocessor_type: Literal["sft", "pretrain"] = field(
         default=None,
         metadata={"help": "preprocessor type"},
     )
@@ -54,25 +54,25 @@ class DataPipelineArguments:
         metadata={"help": "Whether to batch the data during preprocessing."},
     )
     train_dataset_prefix: List[str] = field(
-        default="train",
+        default_factory=list,
         metadata={"help": "A prefix required to distinguish training splits in the data loaded by load_dataset."},
     )
     valid_dataset_prefix: List[str] = field(
-        default="validation",
+        default_factory=list,
         metadata={"help": "A prefix required to distinguish validation splits in the data loaded by load_dataset."},
     )
     test_dataset_prefix: List[str] = field(
-        default="eval_other",
+        default_factory=list,
         metadata={"help": "A prefix required to distinguish test splits in the data loaded by load_dataset."},
     )
     data_truncate_map: Optional[Union[dict, str]] = field(
-        default=None,
+        default="{}",
         metadata={
             "help": "A map to truncate part of the data. Example: {'repo_name': {'train': 3000, 'validation': 1500}}."
         },
     )
     data_name_map: Optional[Union[dict, str]] = field(
-        default=None,
+        default="{}",
         metadata={"help": "A map to config_name of the data. Example: {'repo_name': 'data_config_name'}."},
     )
     do_data_main_process_first: bool = field(
@@ -123,15 +123,15 @@ class TrainPipelineArguments:
         default=True,
         metadata={"help": "Whether to shuffle sequences during packing."},
     )
-    config_kwargs: Dict = field(
+    config_kwargs: Optional[Union[dict, str]] = field(
         default="{}",
         metadata={"help": ""},
     )
-    model_kwargs: str = field(
+    model_kwargs: Optional[Union[dict, str]] = field(
         default="{}",
         metadata={"help": ""},
     )
-    tokenizer_kwargs: str = field(
+    tokenizer_kwargs: Optional[Union[dict, str]] = field(
         default="{}",
         metadata={"help": ""},
     )
@@ -169,7 +169,15 @@ class SFTTrainingArguments(
     TrainPipelineArguments,
     EvalPipelineArguments,
 ):
+    output_dir: str = field(
+        default=None,
+        metadata={"help": "The output directory where the model predictions and checkpoints will be written."},
+    )
+
     def __post_init__(self):
+        if self.output_dir is None:
+            raise ValueError("output_dir은 무조건 설정되어 있어야 한다.")
+
         super().__post_init__()
 
         def _convert_str_dict(passed_value: dict):
@@ -297,7 +305,7 @@ def main(train_args: SFTTrainingArguments) -> None:
                 logger.info(f"{repo_name}/{dataset_key}-length: {length_ls}")
                 logger.info(f"{repo_name}/{dataset_key}-size: {original_size} -> {len(dataset)}")
 
-        def concatenate_and_log(datasets_ls, dataset_type):
+        def concat(datasets_ls, dataset_type):
             if datasets_ls:
                 dataset = concatenate_datasets(datasets_ls)
                 dataset.set_format("pt")
@@ -346,40 +354,12 @@ def main(train_args: SFTTrainingArguments) -> None:
             for dataset_key in datasets:
                 process_dataset(datasets[dataset_key], dataset_key, repo_name, truncate_map, filter_cache_file_name)
 
-        train_dataset, valid_dataset, test_dataset = (
-            concatenate_and_log(train_dataset_ls, "train"),
-            concatenate_and_log(valid_dataset_ls, "valid"),
-            concatenate_and_log(test_dataset_ls, "test"),
-        )
+        train_dataset = concat(train_dataset_ls, "train")
+        valid_dataset = concat(valid_dataset_ls, "valid")
+        test_dataset = concat(test_dataset_ls, "test")
 
-        sample_dataset = train_dataset or valid_dataset or test_dataset
-        if sample_dataset and train_args.is_world_process_zero:
-            formated_instruct = tokenizer.decode(sample_dataset[0]["input_ids"], skip_special_tokens=False)
-            logger.info(f"formated_instruct: {formated_instruct}")
-
-            if train_args.response_template is not None:
-                response_template = tokenizer.decode(train_args.response_template, skip_special_tokens=False)
-                logger.info(f"response_template: {response_template}")
-                if response_template not in formated_instruct:
-                    raise ValueError("이거 response_template이 formated_instruct에 포함되어 있지 않음. 다시 설정하셈")
-            else:
-                raise logger.error("response_template이 없음. 다시 설정하셈.")
-
-            if train_args.instruction_template is not None:
-                instruction_template = tokenizer.decode(train_args.instruction_template, skip_special_tokens=False)
-                logger.info(f"instruction_template: {instruction_template}")
-                if instruction_template not in formated_instruct:
-                    raise ValueError(
-                        "이거 instruction_template이 formated_instruct에 포함되어 있지 않음. 다시 설정하셈"
-                    )
-            else:
-                logger.warning("instruction_template이 없음. 근데 애러는 발생하지 않고 그냥 패스함.")
-        elif sample_dataset is None:
-            logger.warning("train, valid, test데이터가 전혀 없는 상태인데 확인 한번 해봐.")
-
-        end_time = time.time()
         if train_args.is_world_process_zero:
-            logger.info(f"load_dataset_time: {end_time - start_time:.2f}")
+            logger.info(f"load_dataset_time: {time.time() - start_time:.2f}")
 
         return train_dataset, valid_dataset, test_dataset
 
@@ -444,9 +424,7 @@ def main(train_args: SFTTrainingArguments) -> None:
     model_kwargs = {"config": config, **train_args.model_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
 
-    model.load_adapter
-
-    tokenizer = check_tokenizer(tokenizer)
+    # tokenizer = check_tokenizer(tokenizer)
 
     if train_args.freeze_named_param:
         freeze_param_ls = [param for name, param in model.named_parameters() if name in train_args.freeze_named_param]
@@ -474,8 +452,10 @@ def main(train_args: SFTTrainingArguments) -> None:
         )
 
     match train_args.data_preprocessor_type:
-        case "default":
-            preprocessor_func = default_preprocessor
+        case "sft":
+            preprocessor_func = sft_processor
+        case "pretrain":
+            preprocessor_func = pretrain_processor
 
     # load datasets
     context = (
@@ -487,15 +467,17 @@ def main(train_args: SFTTrainingArguments) -> None:
         # load datasets
         train_dataset, valid_dataset, test_dataset = processing_datasets(preprocessor_func)
 
-    collator = DataPackingCollatorForCompletionOnlyLM(
+    collator = PackingCollatorForCompletionOnlyLM(
         tokenizer=tokenizer,
         response_template=train_args.response_template,
         instruction_template=train_args.instruction_template,
         args=train_args,
         dtype=model.dtype,
+        clm=train_args.data_preprocessor_type == "pretrain",
+        sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 
-    sample_check = collator.torch_call([[train_dataset[0]]] if train_args.do_packing else [train_dataset[0]])
+    sample_check = collator([train_dataset[0]])
     if train_args.is_world_process_zero:
         sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
         check_labels = [tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]

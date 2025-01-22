@@ -8,8 +8,9 @@ from datasets import Dataset
 from torch.utils.data import DataLoader, RandomSampler, Sampler
 from trl.trainer.utils import DataCollatorForCompletionOnlyLM
 
-from transformers import Trainer
+from transformers import Trainer, TrainingArguments
 from transformers import logging as hf_logging
+from transformers.data.data_collator import DataCollatorMixin
 from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.trainer_utils import has_length, seed_worker
 from transformers.utils import is_datasets_available
@@ -271,14 +272,41 @@ class PackingTrainer(Trainer):
             return RandomSampler(self.train_dataset)
 
 
-class DataPackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
-    def __init__(self, args, dtype, **kwargs):
+class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
+    def __init__(
+        self,
+        args: TrainingArguments,
+        dtype: torch.dtype,
+        clm: bool = False,
+        sample_dataset: Optional[Dataset] = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self.pack_max_seq = args.data_max_length
-        self.attn_implementation = args.attn_implementation
-        self.args = args
-        self.do_packing = args.do_packing
         self.dtype = dtype
+        self.args = args
+        self.clm = clm
+
+        if not self.clm and (sample_dataset and args.is_world_process_zero):
+            formated_instruct = self.tokenizer.decode(sample_dataset[0]["input_ids"], skip_special_tokens=False)
+            logger.info(f"formated_instruct: {formated_instruct}")
+
+            if args.response_template is not None:
+                response_template = self.tokenizer.decode(args.response_template, skip_special_tokens=False)
+                logger.info(f"response_template: {response_template}")
+                if response_template not in formated_instruct:
+                    raise ValueError("이거 response_template이 formated_instruct에 포함되어 있지 않음. 다시 설정하셈")
+            else:
+                raise logger.error("response_template이 없음. 다시 설정하셈.")
+
+            if args.instruction_template is not None:
+                instruction_template = self.tokenizer.decode(args.instruction_template, skip_special_tokens=False)
+                logger.info(f"instruction_template: {instruction_template}")
+                if instruction_template not in formated_instruct:
+                    raise ValueError(
+                        "이거 instruction_template이 formated_instruct에 포함되어 있지 않음. 다시 설정하셈"
+                    )
+            else:
+                logger.warning("instruction_template이 없음. 근데 애러는 발생하지 않고 그냥 패스함.")
 
     def _create_attention_mask(self, input_length_ls):
         total_length = sum(input_length_ls)
@@ -297,9 +325,14 @@ class DataPackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
     def _process_features(self, features_ls):
         input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
         for features in features_ls:
-            batch = super().torch_call([features])
-            input_ids, labels = batch.input_ids[0], batch.labels[0]
-            length = len(input_ids)
+            if self.clm:
+                input_ids = features["input_ids"]
+                labels = input_ids.clone()
+                length = len(input_ids)
+            else:
+                batch = super().torch_call([features])
+                input_ids, labels = batch.input_ids[0], batch.labels[0]
+                length = len(input_ids)
 
             labels_ls.append(labels)
             input_ids_ls.append(input_ids)
@@ -309,24 +342,22 @@ class DataPackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
         return input_ids_ls, labels_ls, position_ids_ls, input_length_ls
 
     def torch_call(self, features_ls):
-        if isinstance(features_ls[0], dict):
-            input_ids_ls, labels_ls, position_ids_ls, input_length_ls = self._process_features(features_ls)
-        elif isinstance(features_ls[0], list):
-            input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
-            for packing_ls in features_ls:
-                ids, labels, positions, lengths = self._process_features(packing_ls)
-                input_ids_ls.extend(ids)
-                labels_ls.extend(labels)
-                position_ids_ls.extend(positions)
-                input_length_ls.extend(lengths)
-
-        attention_mask = self._create_attention_mask(input_length_ls)
+        input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
+        for packing_ls in features_ls:
+            packing_ls = [packing_ls] if isinstance(packing_ls, dict) else packing_ls
+            ids, labels, positions, lengths = self._process_features(packing_ls)
+            input_ids_ls.extend(ids)
+            labels_ls.extend(labels)
+            position_ids_ls.extend(positions)
+            input_length_ls.extend(lengths)
 
         batch = {
             "labels": torch.concat(labels_ls)[None],
             "input_ids": torch.concat(input_ids_ls)[None],
             "position_ids": torch.concat(position_ids_ls)[None],
-            "attention_mask": attention_mask,
         }
+
+        if self.args.attn_implementation == "eager":
+            batch["attention_mask"] = self._create_attention_mask(input_length_ls)
 
         return batch
