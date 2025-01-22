@@ -308,6 +308,19 @@ class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
             else:
                 logger.warning("instruction_template이 없음. 근데 애러는 발생하지 않고 그냥 패스함.")
 
+        sample_check = self([sample_dataset[0]])
+        if self.args.is_world_process_zero:
+            sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
+            check_labels = [self.tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
+            check_labels = ", ".join(check_labels)
+            logger.info(f"collator_label: [-100,  ..., -100, {check_labels}]")
+
+        if self.tokenizer.bos_token_ids not in sample_check["input_ids"].tolist()[0]:
+            raise ValueError("BOS token이 없다. 이거 다시 전처리 해라.")
+
+        if self.tokenizer.eos_token_ids not in sample_check["input_ids"].tolist()[0]:
+            raise ValueError("EOS token이 없다. 이거 다시 전처리 해라.")
+
     def _create_attention_mask(self, input_length_ls):
         total_length = sum(input_length_ls)
         attention_mask = torch.full((1, 1, total_length, total_length), torch.finfo(self.dtype).min)

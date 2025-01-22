@@ -123,6 +123,10 @@ class TrainPipelineArguments:
         default=True,
         metadata={"help": "Whether to shuffle sequences during packing."},
     )
+    profiling_kwargs: Optional[Union[dict, str]] = field(
+        default="{}",
+        metadata={"help": "profiling_kwargs"},
+    )
     config_kwargs: Optional[Union[dict, str]] = field(
         default="{}",
         metadata={"help": ""},
@@ -203,6 +207,7 @@ class SFTTrainingArguments(
             "config_kwargs",
             "model_kwargs",
             "tokenizer_kwargs",
+            "profiling_kwargs",
         ]
         _VALID_LIST_FIELDS = [
             "instruction_template",
@@ -457,14 +462,11 @@ def main(train_args: SFTTrainingArguments) -> None:
         case "pretrain":
             preprocessor_func = pretrain_processor
 
-    # load datasets
-    context = (
+    with (
         train_args.main_process_first(desc="main_process_first")
         if train_args.do_data_main_process_first
         else nullcontext()
-    )
-    with context:
-        # load datasets
+    ):
         train_dataset, valid_dataset, test_dataset = processing_datasets(preprocessor_func)
 
     collator = PackingCollatorForCompletionOnlyLM(
@@ -476,19 +478,6 @@ def main(train_args: SFTTrainingArguments) -> None:
         clm=train_args.data_preprocessor_type == "pretrain",
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
-
-    sample_check = collator([train_dataset[0]])
-    if train_args.is_world_process_zero:
-        sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
-        check_labels = [tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
-        check_labels = ", ".join(check_labels)
-        logger.info(f"collator_label: [-100,  ..., -100, {check_labels}]")
-
-    if tokenizer.bos_token_ids not in sample_check["input_ids"].tolist()[0]:
-        raise ValueError("BOS token이 없다. 이거 다시 전처리 해라.")
-
-    if tokenizer.eos_token_ids not in sample_check["input_ids"].tolist()[0]:
-        raise ValueError("EOS token이 없다. 이거 다시 전처리 해라.")
 
     callbacks = None
     if train_args.do_logic_kor_at_save:
@@ -519,8 +508,7 @@ def main(train_args: SFTTrainingArguments) -> None:
 
 
 def train(trainer: PackingTrainer, args: SFTTrainingArguments) -> None:
-    profile_kwargs = ProfileKwargs(activities=["cpu", "cuda"], profile_memory=True, with_flops=True)
-    context = trainer.accelerator.profile(profile_kwargs) if args.profiling else nullcontext()
+    context = trainer.accelerator.profile(ProfileKwargs(**args.profiling_kwargs)) if args.profiling else nullcontext()
 
     with context as prof:
         trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
