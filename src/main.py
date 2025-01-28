@@ -5,9 +5,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Literal, Optional, Tuple, Union
 
+import optimization
 import torch
 from accelerate import ProfileKwargs
-from data_preprocessor import pretrain_processor, sft_processor
+from data_preprocessor import passage_sft_processor, pretrain_processor, sft_processor
 from datasets import Dataset, concatenate_datasets, load_dataset
 from setproctitle import setproctitle
 from trainer import PackingCollatorForCompletionOnlyLM, PackingTrainer
@@ -26,13 +27,19 @@ from transformers.trainer_pt_utils import get_model_param_count
 from transformers.utils import is_sagemaker_mp_enabled
 
 
+PREPROCESSOR_MAP = {
+    "sft": sft_processor,
+    "pretrain": pretrain_processor,
+}
+
+
 @dataclass
 class DataPipelineArguments:
     dataset_repo_ls: List[str] = field(
         default_factory=list,
         metadata={"help": "The list of dataset repository names to use (via the datasets library)."},
     )
-    data_preprocessor_type: Literal["sft", "pretrain"] = field(
+    data_preprocessor_type: Literal["sft", "passage-sft", "pretrain"] = field(
         default=None,
         metadata={"help": "preprocessor type"},
     )
@@ -385,6 +392,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         bos_token_id, eos_token_id = tokenizer.bos_token_id, tokenizer.eos_token_id
         bos_token, eos_token = tokenizer.bos_token, tokenizer.eos_token
         is_add_bos, is_add_eos = input_ids[0] == bos_token_id, input_ids[-1] == eos_token_id
+        tokenizer.chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% if not continue_final_message is defined %}{% set continue_final_message = false %}{% endif %}{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>' }}{% if message.role == 'user' %}{{ '### User:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'system' %}{{ '### System:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'assistant' %}{{ '### Assistant:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ '<img>' }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{% endif %}{% if not (continue_final_message and loop.last) %}{{ '<end_of_turn>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<start_of_turn>' }}{{ '### Assistant:\n' }}{% elif not continue_final_message %}{{ eos_token }}{% endif %}"
 
         if train_args.chat_template:
             tokenizer.chat_template = train_args.chat_template
@@ -429,7 +437,7 @@ def main(train_args: SFTTrainingArguments) -> None:
     model_kwargs = {"config": config, **train_args.model_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
 
-    # tokenizer = check_tokenizer(tokenizer)
+    tokenizer = check_tokenizer(tokenizer)
 
     if train_args.freeze_named_param:
         freeze_param_ls = [param for name, param in model.named_parameters() if name in train_args.freeze_named_param]
@@ -456,18 +464,13 @@ def main(train_args: SFTTrainingArguments) -> None:
             fullgraph=True,
         )
 
-    match train_args.data_preprocessor_type:
-        case "sft":
-            preprocessor_func = sft_processor
-        case "pretrain":
-            preprocessor_func = pretrain_processor
-
+    process_func = PREPROCESSOR_MAP[train_args.data_preprocessor_type]
     with (
         train_args.main_process_first(desc="main_process_first")
         if train_args.do_data_main_process_first
         else nullcontext()
     ):
-        train_dataset, valid_dataset, test_dataset = processing_datasets(preprocessor_func)
+        train_dataset, valid_dataset, test_dataset = processing_datasets(process_func)
 
     collator = PackingCollatorForCompletionOnlyLM(
         tokenizer=tokenizer,
