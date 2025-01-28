@@ -1,10 +1,28 @@
 import math
+from enum import EnumMeta
 from functools import partial
 
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 
+import transformers.trainer_utils
+from transformers.optimization import TYPE_TO_SCHEDULER_FUNCTION, SchedulerType
+from transformers.utils import ExplicitEnum
 
+
+class NewSchedulerMeta(EnumMeta):
+    def __new__(metacls, name, bases, class_dict):
+        # SchedulerType의 멤버를 동적으로 추가
+        for member in SchedulerType:
+            class_dict[member.name] = member.value
+        return super().__new__(metacls, name, bases, class_dict)
+
+
+class NewSchedulerType(ExplicitEnum, metaclass=NewSchedulerMeta):
+    BETTER_COSINE = "better_cosine"  # 추가됨
+
+
+# 대충 warmup시 linear, cosine선택하게 한다던지 아님 pow줘서 곡률 어떻게 줄지 개선한 버전임
 def _get_better_cosine_schedule_with_warmup_lr_lambda(
     current_step: int,
     *,
@@ -82,3 +100,12 @@ def get_better_cosine_schedule_with_warmup(
         min_lr_rate=min_lr_rate,
     )
     return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+NEW_TYPE_TO_SCHEDULER_FUNCTION = TYPE_TO_SCHEDULER_FUNCTION
+NEW_TYPE_TO_SCHEDULER_FUNCTION.update({NewSchedulerType.BETTER_COSINE: get_better_cosine_schedule_with_warmup})
+
+transformers.trainer_utils.SchedulerType = NewSchedulerType
+transformers.training_args.SchedulerType = NewSchedulerType
+transformers.optimization.SchedulerType = NewSchedulerType
+transformers.optimization.TYPE_TO_SCHEDULER_FUNCTION = TYPE_TO_SCHEDULER_FUNCTION
