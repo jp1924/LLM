@@ -315,10 +315,10 @@ class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
             check_labels = ", ".join(check_labels)
             logger.info(f"collator_label: [-100,  ..., -100, {check_labels}]")
 
-        if self.tokenizer.bos_token_ids not in sample_check["input_ids"].tolist()[0]:
+        if self.tokenizer.bos_token_id not in sample_check["input_ids"].tolist()[0]:
             raise ValueError("BOS token이 없다. 이거 다시 전처리 해라.")
 
-        if self.tokenizer.eos_token_ids not in sample_check["input_ids"].tolist()[0]:
+        if self.tokenizer.eos_token_id not in sample_check["input_ids"].tolist()[0]:
             raise ValueError("EOS token이 없다. 이거 다시 전처리 해라.")
 
     def _create_attention_mask(self, input_length_ls):
