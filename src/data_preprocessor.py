@@ -12,15 +12,17 @@ def check_special_token(input_ids, tokenizer):
 
 def sft_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
     preprocess_finish_ls = list()
-    for conversations in example["conversations"]:
-        text = tokenizer.apply_chat_template(conversations)
+    for row_dataset in list(zip(*[example[key] for key in example])):
+        row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
+        text = tokenizer.apply_chat_template(row_dataset["conversation"], tokenize=False)
         outputs = tokenizer(text, return_tensors="np", return_length=True)
 
-        finish_data = {
-            "input_ids": outputs.input_ids,
-            args.length_column_name: outputs.length[0],
-        }
-        preprocess_finish_ls.append(finish_data)
+        preprocess_finish_ls.append(
+            {
+                "input_ids": check_special_token(outputs.input_ids[0], tokenizer),
+                args.length_column_name: outputs.length[0],
+            }
+        )
 
     return_dict = dict()
     for res in preprocess_finish_ls:
