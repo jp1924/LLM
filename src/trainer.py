@@ -27,7 +27,7 @@ class PackingSampler(Sampler):
         lengths: List[int],
         max_seq_len: int,
         max_seq_per_pack: int,
-        do_shuffle: bool = False,
+        do_shuffle: bool = True,
     ):
         self.dataset = dataset
 
