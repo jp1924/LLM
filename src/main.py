@@ -8,7 +8,7 @@ from typing import Callable, List, Literal, Optional, Tuple, Union
 import optimization
 import torch
 from accelerate import ProfileKwargs
-from data_preprocessor import passage_sft_processor, pretrain_processor, sft_processor
+from data_preprocessor import pretrain_processor, sft_processor
 from datasets import Dataset, concatenate_datasets, load_dataset
 from setproctitle import setproctitle
 from trainer import PackingCollatorForCompletionOnlyLM, PackingTrainer
@@ -255,6 +255,11 @@ class SFTTrainingArguments(
             "attn_implementation": self.attn_implementation,
         }
 
+        self.tokenizer_kwargs = {
+            **self.tokenizer_kwargs,
+            "padding_side": self.padding_side,
+        }
+
         self.cache_dir = Path(self.cache_dir) if self.cache_dir else None
         self.model_name_or_path = self.resume_from_checkpoint or self.model_name_or_path
 
@@ -480,6 +485,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         dtype=model.dtype,
         clm=train_args.data_preprocessor_type == "pretrain",
         sample_dataset=train_dataset or valid_dataset or test_dataset,
+        padding_free=False,
     )
 
     callbacks = None
