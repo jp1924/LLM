@@ -19,3 +19,4 @@ LLM 학습시키는 코드 모와둔 repo
 
 - [DataCollatorWithFlatteningtransformers.DataCollatorWithFlattening](https://huggingface.co/docs/transformers/ko/main_classes/data_collator#transformers.DataCollatorWithFlattening)
 - [Improving Hugging Face Training Efficiency Through Packing with Flash Attention](https://huggingface.co/blog/packing-with-FA2)
+- [LLM 학습을 두배이상 빠르게 Sequence-Packing](https://arca.live/b/alpaca/127995776?p=1)
