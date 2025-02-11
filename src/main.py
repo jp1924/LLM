@@ -8,7 +8,6 @@ from typing import Callable, List, Literal, Optional, Tuple, Union
 import optimization
 import torch
 from accelerate import ProfileKwargs
-from data_preprocessor import pretrain_processor, sft_processor
 from datasets import Dataset, concatenate_datasets, load_dataset
 from setproctitle import setproctitle
 from trainer import PackingCollatorForCompletionOnlyLM, PackingTrainer
@@ -25,12 +24,7 @@ from transformers import (
 from transformers import logging as hf_logging
 from transformers.trainer_pt_utils import get_model_param_count
 from transformers.utils import is_sagemaker_mp_enabled
-
-
-PREPROCESSOR_MAP = {
-    "sft": sft_processor,
-    "pretrain": pretrain_processor,
-}
+from workspace.LLM.src.preprocessor import PROCESSOR_REGISTRY
 
 
 @dataclass
@@ -99,7 +93,7 @@ class TrainPipelineArguments:
         metadata={"help": "The name or path of the pre-trained model."},
     )
     response_template: str = field(
-        default=None,
+        default_factory=lambda: PROCESSOR_REGISTRY.keys(),
         metadata={"help": "The template for generating responses."},
     )
     instruction_template: str = field(
@@ -285,7 +279,9 @@ logger = hf_logging.get_logger("transformers")
 
 
 def main(train_args: SFTTrainingArguments) -> None:
-    def processing_datasets(func: Callable) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
+    def processing_datasets(
+        func: Callable,
+    ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
         def process_dataset(dataset, dataset_key, repo_name, truncate_map, filter_cache_file_name):
             original_size = len(dataset)
 
@@ -369,7 +365,13 @@ def main(train_args: SFTTrainingArguments) -> None:
             )
 
             for dataset_key in datasets:
-                process_dataset(datasets[dataset_key], dataset_key, repo_name, truncate_map, filter_cache_file_name)
+                process_dataset(
+                    datasets[dataset_key],
+                    dataset_key,
+                    repo_name,
+                    truncate_map,
+                    filter_cache_file_name,
+                )
 
         train_dataset = concat(train_dataset_ls, "train")
         valid_dataset = concat(valid_dataset_ls, "valid")
@@ -396,7 +398,10 @@ def main(train_args: SFTTrainingArguments) -> None:
         input_ids = tokenizer("안녕하세요").input_ids
         bos_token_id, eos_token_id = tokenizer.bos_token_id, tokenizer.eos_token_id
         bos_token, eos_token = tokenizer.bos_token, tokenizer.eos_token
-        is_add_bos, is_add_eos = input_ids[0] == bos_token_id, input_ids[-1] == eos_token_id
+        is_add_bos, is_add_eos = (
+            input_ids[0] == bos_token_id,
+            input_ids[-1] == eos_token_id,
+        )
 
         if train_args.chat_template:
             tokenizer.chat_template = train_args.chat_template
@@ -426,7 +431,11 @@ def main(train_args: SFTTrainingArguments) -> None:
         setattr(tokenizer, "add_eos_token", is_add_eos)
 
         # TODO: 기존에 존재하던 build_inputs_with_special_tokens까지 덮어 씌어비리는 문제가 있다. 이거 나중에 채크해서 수정해야 할 듯.
-        setattr(tokenizer, "build_inputs_with_special_tokens", build_inputs_with_special_tokens)
+        setattr(
+            tokenizer,
+            "build_inputs_with_special_tokens",
+            build_inputs_with_special_tokens,
+        )
 
         return tokenizer
 
@@ -468,13 +477,14 @@ def main(train_args: SFTTrainingArguments) -> None:
             fullgraph=True,
         )
 
-    process_func = PREPROCESSOR_MAP[train_args.data_preprocessor_type]
     with (
         train_args.main_process_first(desc="main_process_first")
         if train_args.do_data_main_process_first
         else nullcontext()
     ):
-        train_dataset, valid_dataset, test_dataset = processing_datasets(process_func)
+        train_dataset, valid_dataset, test_dataset = processing_datasets(
+            PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
+        )
 
     collator = PackingCollatorForCompletionOnlyLM(
         tokenizer=tokenizer,

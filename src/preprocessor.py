@@ -59,3 +59,23 @@ def pretrain_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingAr
             return_dict.setdefault(key, []).append(value)
 
     return return_dict
+
+
+def reasoning_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+    process_finish_ls = list()
+    for row_dataset in list(zip(*[example[key] for key in example])):
+        row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
+
+    return_dict = dict()
+    for res in process_finish_ls:
+        for key, value in res.items():
+            return_dict.setdefault(key, []).append(value)
+
+    return return_dict
+
+
+PROCESSOR_REGISTRY = {
+    "sft": sft_processor,
+    "reasoning_sft": reasoning_processor,
+    "pretrain": pretrain_processor,
+}
