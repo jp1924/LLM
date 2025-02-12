@@ -11,6 +11,7 @@
         "contiguous_gradients": true,
         "stage3_gather_16bit_weights_on_model_save": true
     },
+    "zero_allow_untested_optimizer": true,
     "gradient_accumulation_steps": "auto",
     "gradient_clipping": "auto",
     "steps_per_print": 2000,

@@ -20,6 +20,7 @@
             "pin_memory": true
         }
     },
+    "zero_allow_untested_optimizer": true,
     "gradient_accumulation_steps": "auto",
     "gradient_clipping": "auto",
     "steps_per_print": 2000,
