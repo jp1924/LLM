@@ -62,12 +62,33 @@ def pretrain_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingAr
 
 
 def reasoning_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
-    process_finish_ls = list()
+    preprocess_finish_ls = list()
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
 
+        conversations = [
+            {"role": "user", "content": [{"type": "text", "text": row_dataset["question"]}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "reason", "text": row_dataset["reasoning"]},
+                    {"type": "text", "text": row_dataset["response"]},
+                ],
+            },
+        ]
+
+        text = tokenizer.apply_chat_template(conversations, tokenize=False)
+        outputs = tokenizer(text, return_tensors="np", return_length=True)
+
+        preprocess_finish_ls.append(
+            {
+                "input_ids": check_special_token(outputs.input_ids[0], tokenizer),
+                args.length_column_name: outputs.length[0],
+            }
+        )
+
     return_dict = dict()
-    for res in process_finish_ls:
+    for res in preprocess_finish_ls:
         for key, value in res.items():
             return_dict.setdefault(key, []).append(value)
 
