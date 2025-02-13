@@ -585,7 +585,13 @@ def train(trainer: PackingTrainer, args: SFTTrainingArguments) -> None:
     context = trainer.accelerator.profile(ProfileKwargs(**args.profiling_kwargs)) if args.profiling else nullcontext()
 
     with context as prof:
-        trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+        try:
+            trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+        finally:
+            try:
+                trainer._save_checkpoint(trainer.model, None)
+            except BaseException:
+                pass
 
     save_path = Path(args.output_dir)
     if prof:
