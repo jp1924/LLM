@@ -13,7 +13,7 @@ from datasets import Dataset, concatenate_datasets, load_dataset
 from datasets import logging as ds_logging
 from setproctitle import setproctitle
 
-import optimization
+# import optimization
 from preprocessor import PROCESSOR_REGISTRY
 from trainer import PackingCollatorForCompletionOnlyLM, PackingTrainer
 from transformers import (
@@ -96,7 +96,7 @@ class TrainPipelineArguments:
         metadata={"help": "The name or path of the pre-trained model."},
     )
     response_template: str = field(
-        default_factory=lambda: PROCESSOR_REGISTRY.keys(),
+        default=None,
         metadata={"help": "The template for generating responses."},
     )
     instruction_template: str = field(
@@ -151,6 +151,10 @@ class TrainPipelineArguments:
     profiling: bool = field(
         default=False,
         metadata={"help": "Whether to enable profiling during training."},
+    )
+    save_finally: bool = field(
+        default=False,
+        metadata={"help": "Whether to save the model finally."},
     )
 
 
@@ -235,17 +239,17 @@ class SFTTrainingArguments(
             elif isinstance(passed_value, dict) or passed_value is None:
                 pass
             else:
-                raise ValueError(f"{field}은 dict로 설정해야 함.")
+                raise ValueError(f"{field}은 dict로 설정해야 함. {passed_value}")
 
         for field in _VALID_LIST_FIELDS:
             passed_value = getattr(self, field)
             if isinstance(passed_value, str) and passed_value.startswith("["):
                 loaded_list = json.loads(passed_value)
                 setattr(self, field, loaded_list)
-            elif isinstance(passed_value, list) or passed_value is None:
+            elif passed_value is None or isinstance(passed_value, list):
                 pass
             else:
-                raise ValueError(f"{field}은 list로 설정해야 함.")
+                raise ValueError(f"{field}은 list로 설정해야 함. {passed_value}")
 
         self.config_kwargs = {
             **self.config_kwargs,
@@ -458,7 +462,7 @@ def main(train_args: SFTTrainingArguments) -> None:
             input_ids[0] == bos_token_id,
             input_ids[-1] == eos_token_id,
         )
-
+        # train_args.chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% if not continue_final_message is defined %}{% set continue_final_message = false %}{% endif %}{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>' }}{% if message.role == 'user' %}{{ '### User:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ image_token }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'system' %}{{ '### System:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ image_token }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'passage' %}{{ '### Passage:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ image_token }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'assistant' %}{{ '### Assistant:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ image_token }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{% endif %}{% if not (continue_final_message and loop.last) %}{{ '<end_of_turn>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<start_of_turn>' }}{{ '### Assistant:\n' }}{% elif not continue_final_message %}{{ eos_token }}{% endif %}"
         if train_args.chat_template:
             tokenizer.chat_template = train_args.chat_template
             logger.info(f"chat_template: {train_args.chat_template}")
@@ -506,7 +510,8 @@ def main(train_args: SFTTrainingArguments) -> None:
     model_kwargs = {"config": config, **train_args.model_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
 
-    tokenizer = check_tokenizer(tokenizer)
+    if train_args.data_preprocessor_type != "pretrain":
+        tokenizer = check_tokenizer(tokenizer)
 
     if train_args.freeze_named_param:
         freeze_param_ls = [param for name, param in model.named_parameters() if name in train_args.freeze_named_param]
@@ -550,7 +555,6 @@ def main(train_args: SFTTrainingArguments) -> None:
         dtype=model.dtype,
         clm=train_args.data_preprocessor_type == "pretrain",
         sample_dataset=train_dataset or valid_dataset or test_dataset,
-        padding_free=False,
     )
 
     callbacks = None
@@ -588,10 +592,11 @@ def train(trainer: PackingTrainer, args: SFTTrainingArguments) -> None:
         try:
             trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
         finally:
-            try:
-                trainer._save_checkpoint(trainer.model, None)
-            except BaseException:
-                pass
+            if args.save_finally:
+                try:
+                    trainer._save_checkpoint(trainer.model, None)
+                except BaseException:
+                    pass
 
     save_path = Path(args.output_dir)
     if prof:
@@ -605,6 +610,35 @@ def train(trainer: PackingTrainer, args: SFTTrainingArguments) -> None:
 def valid(trainer: PackingTrainer, valid_datasets: Dataset) -> None:
     valid_datasets = valid_datasets if valid_datasets else trainer.eval_dataset
     trainer.evaluate(valid_datasets)
+
+
+@torch.no_grad()
+def test(trainer: PackingTrainer, test_datasets: Dataset) -> None:
+    from transformers import GenerationConfig, TextGenerationPipeline
+    from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
+
+    pipeline = TextGenerationPipeline(
+        model=trainer.model.eval(),
+        tokenizer=trainer.processing_class,
+        device=trainer.model.device,
+        batch_size=trainer.args.per_device_eval_batch_size,
+    )
+    generate_kwargs = {
+        "generation_config": GenerationConfig(
+            max_new_tokens=1024,
+            use_cache=True,
+            do_sample=True,
+            repetition_penalty=1.2,
+            cache_implementation="hybrid",
+        ),
+        "synced_gpus": is_deepspeed_zero3_enabled(),
+    }
+    for data in test_datasets:
+        outputs_1 = pipeline(
+            trainer.processing_class.decode(data["input_ids"]),
+            return_full_text=True,
+            **generate_kwargs,
+        )
 
 
 if "__main__" in __name__:
