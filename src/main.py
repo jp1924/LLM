@@ -12,7 +12,6 @@ from accelerate import ProfileKwargs
 from datasets import Dataset, concatenate_datasets, load_dataset
 from datasets import logging as ds_logging
 from setproctitle import setproctitle
-from trl import SFTConfig
 
 import optimization
 from preprocessor import PROCESSOR_REGISTRY
@@ -22,7 +21,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     HfArgumentParser,
-    PreTrainedTokenizer,
     TrainingArguments,
     set_seed,
 )
@@ -180,7 +178,7 @@ class SFTTrainingArguments(
     DataPipelineArguments,
     TrainPipelineArguments,
     EvalPipelineArguments,
-    SFTConfig,
+    TrainingArguments,
 ):
     output_dir: str = field(
         default=None,
@@ -453,6 +451,16 @@ def main(train_args: SFTTrainingArguments) -> None:
         "pad_token_id": tokenizer.pad_token_id,
     }
     config = AutoConfig.from_pretrained(train_args.model_name_or_path, **config_kwargs)
+
+    with (
+        train_args.main_process_first(desc="main_process_first")
+        if train_args.do_data_main_process_first
+        else nullcontext()
+    ):
+        train_dataset, valid_dataset, test_dataset = processing_datasets(
+            PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
+        )
+
     model_kwargs = {"config": config, **train_args.model_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
 
@@ -479,15 +487,6 @@ def main(train_args: SFTTrainingArguments) -> None:
             backend=train_args.torch_compile_backend,
             mode=train_args.torch_compile_mode,
             fullgraph=True,
-        )
-
-    with (
-        train_args.main_process_first(desc="main_process_first")
-        if train_args.do_data_main_process_first
-        else nullcontext()
-    ):
-        train_dataset, valid_dataset, test_dataset = processing_datasets(
-            PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
         )
 
     collator = PackingCollatorForCompletionOnlyLM(
