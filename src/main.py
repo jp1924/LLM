@@ -444,63 +444,6 @@ def main(train_args: SFTTrainingArguments) -> None:
 
         return train_dataset, valid_dataset, test_dataset
 
-    def check_tokenizer(tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
-        # copied from: transformers/models/llama/tokenization_llama.py:LlamaTokenizer:build_inputs_with_special_tokens()
-        def build_inputs_with_special_tokens(tokenizer, token_ids_0, token_ids_1=None):
-            bos_token_id = [tokenizer.bos_token_id] if tokenizer.add_bos_token else []
-            eos_token_id = [tokenizer.eos_token_id] if tokenizer.add_eos_token else []
-
-            output = bos_token_id + token_ids_0 + eos_token_id
-
-            if token_ids_1 is not None:
-                output = output + bos_token_id + token_ids_1 + eos_token_id
-
-            return output
-
-        input_ids = tokenizer("안녕하세요").input_ids
-        bos_token_id, eos_token_id = tokenizer.bos_token_id, tokenizer.eos_token_id
-        bos_token, eos_token = tokenizer.bos_token, tokenizer.eos_token
-        is_add_bos, is_add_eos = (
-            input_ids[0] == bos_token_id,
-            input_ids[-1] == eos_token_id,
-        )
-
-        if train_args.chat_template:
-            tokenizer.chat_template = train_args.chat_template
-            logger.info(f"chat_template: {train_args.chat_template}")
-
-        user_chat = {"role": "user", "content": "Hello, how are you?"}
-        assistant_chat = {"role": "assistant", "content": "I'm fine, thank you."}
-        text = tokenizer.apply_chat_template([user_chat, assistant_chat], tokenize=False)
-
-        msg = ""
-        if not is_add_bos:
-            msg += "tokenizer에 add_bos_token이 False로 되어 있음. 전처리 시, bos토큰이 삽입되지 않을 가능성이 있음.\n"
-        if is_add_bos and bos_token in text:
-            msg += "chat_template과 tokenizer에서 자동으로 bos추가해서 중복되어 들어갈 가능성이 있다.\n"
-            is_add_bos = False
-
-        if not is_add_eos:
-            msg += "tokenizer에 add_eos_token이 False로 되어 있음. 전처리 시, eos토큰이 삽입되지 않을 가능성이 있음.\n"
-        if is_add_eos and eos_token in text:
-            msg += "chat_template과 tokenizer에서 자동으로 eos추가해서 중복되어 들어갈 가능성이 있다.\n"
-            is_add_bos = False
-
-        if train_args.is_world_process_zero:
-            logger.warning(msg.strip())
-
-        setattr(tokenizer, "add_bos_token", is_add_bos)
-        setattr(tokenizer, "add_eos_token", is_add_eos)
-
-        # TODO: 기존에 존재하던 build_inputs_with_special_tokens까지 덮어 씌어비리는 문제가 있다. 이거 나중에 채크해서 수정해야 할 듯.
-        setattr(
-            tokenizer,
-            "build_inputs_with_special_tokens",
-            build_inputs_with_special_tokens,
-        )
-
-        return tokenizer
-
     tokenizer = AutoTokenizer.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     config_kwargs = {
         **train_args.config_kwargs,
@@ -511,9 +454,6 @@ def main(train_args: SFTTrainingArguments) -> None:
     config = AutoConfig.from_pretrained(train_args.model_name_or_path, **config_kwargs)
     model_kwargs = {"config": config, **train_args.model_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
-
-    if train_args.data_preprocessor_type != "pretrain":
-        tokenizer = check_tokenizer(tokenizer)
 
     if train_args.freeze_named_param:
         freeze_param_ls = [param for name, param in model.named_parameters() if name in train_args.freeze_named_param]
