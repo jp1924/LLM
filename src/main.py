@@ -12,8 +12,9 @@ from accelerate import ProfileKwargs
 from datasets import Dataset, concatenate_datasets, load_dataset
 from datasets import logging as ds_logging
 from setproctitle import setproctitle
+from trl import SFTConfig
 
-# import optimization
+import optimization
 from preprocessor import PROCESSOR_REGISTRY
 from trainer import PackingCollatorForCompletionOnlyLM, PackingTrainer
 from transformers import (
@@ -22,7 +23,7 @@ from transformers import (
     AutoTokenizer,
     HfArgumentParser,
     PreTrainedTokenizer,
-    Seq2SeqTrainingArguments,
+    TrainingArguments,
     set_seed,
 )
 from transformers import logging as hf_logging
@@ -176,15 +177,16 @@ class EvalPipelineArguments:
 
 @dataclass
 class SFTTrainingArguments(
-    Seq2SeqTrainingArguments,
     DataPipelineArguments,
     TrainPipelineArguments,
     EvalPipelineArguments,
+    SFTConfig,
 ):
     output_dir: str = field(
         default=None,
         metadata={"help": "The output directory where the model predictions and checkpoints will be written."},
     )
+    lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")
 
     def __post_init__(self):
         if self.output_dir is None:
@@ -462,7 +464,7 @@ def main(train_args: SFTTrainingArguments) -> None:
             input_ids[0] == bos_token_id,
             input_ids[-1] == eos_token_id,
         )
-        # train_args.chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% if not continue_final_message is defined %}{% set continue_final_message = false %}{% endif %}{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>' }}{% if message.role == 'user' %}{{ '### User:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ image_token }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'system' %}{{ '### System:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ image_token }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'passage' %}{{ '### Passage:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ image_token }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{{ '\n\n' }}{% elif message.role == 'assistant' %}{{ '### Assistant:\n' }}{% if message.content is not string %}{% for content in message.content %}{% if content.type == 'image' %}{{ image_token }}{% elif content.type == 'text' %}{{ content.text }}{% endif %}{% endfor %}{% else %}{{ message.content }}{% endif %}{% endif %}{% if not (continue_final_message and loop.last) %}{{ '<end_of_turn>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<start_of_turn>' }}{{ '### Assistant:\n' }}{% elif not continue_final_message %}{{ eos_token }}{% endif %}"
+
         if train_args.chat_template:
             tokenizer.chat_template = train_args.chat_template
             logger.info(f"chat_template: {train_args.chat_template}")

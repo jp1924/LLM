@@ -1,6 +1,9 @@
 import math
+import sys
+from dataclasses import field
 from enum import EnumMeta
 from functools import partial
+from typing import Union
 
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
@@ -108,4 +111,8 @@ NEW_TYPE_TO_SCHEDULER_FUNCTION.update({NewSchedulerType.BETTER_COSINE: get_bette
 transformers.trainer_utils.SchedulerType = NewSchedulerType
 transformers.training_args.SchedulerType = NewSchedulerType
 transformers.optimization.SchedulerType = NewSchedulerType
+transformers.training_args.TrainingArguments.__annotations__["lr_scheduler_type"] = Union[NewSchedulerType, str]
+transformers.training_args.TrainingArguments.__init__.__annotations__["lr_scheduler_type"] = Union[
+    NewSchedulerType, str
+]
 transformers.optimization.TYPE_TO_SCHEDULER_FUNCTION = TYPE_TO_SCHEDULER_FUNCTION
