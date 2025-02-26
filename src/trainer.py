@@ -10,7 +10,6 @@ from trl.trainer.utils import DataCollatorForCompletionOnlyLM
 
 from transformers import Trainer, TrainingArguments
 from transformers import logging as hf_logging
-from transformers.data.data_collator import DataCollatorMixin
 from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.trainer_utils import has_length, seed_worker
 from transformers.utils import is_datasets_available
@@ -315,7 +314,10 @@ class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
             check_labels = ", ".join(check_labels)
             logger.info(f"collator_label: [-100,  ..., -100, {check_labels}]")
 
-        if self.tokenizer.bos_token_id not in sample_check["input_ids"].tolist()[0]:
+        if (
+            self.tokenizer.bos_token_id is not None
+            and self.tokenizer.bos_token_id not in sample_check["input_ids"].tolist()[0]
+        ):
             raise ValueError("BOS token이 없다. 이거 다시 전처리 해라.")
 
         if self.tokenizer.eos_token_id not in sample_check["input_ids"].tolist()[0]:
