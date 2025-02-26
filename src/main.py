@@ -261,6 +261,7 @@ class SFTTrainingArguments(
         self.tokenizer_kwargs = {
             **self.tokenizer_kwargs,
             "padding_side": self.padding_side,
+            "chat_template": self.chat_template,
         }
 
         self.cache_dir = Path(self.cache_dir) if self.cache_dir else None
