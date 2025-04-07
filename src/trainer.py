@@ -279,7 +279,7 @@ class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
         clm: bool = False,
         sample_dataset: Optional[Dataset] = None,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(**kwargs)
         self.dtype = dtype
         self.args = args
@@ -323,7 +323,7 @@ class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
         if self.tokenizer.eos_token_id not in sample_check["input_ids"].tolist()[0]:
             raise ValueError("EOS token이 없다. 이거 다시 전처리 해라.")
 
-    def _create_attention_mask(self, input_length_ls):
+    def _create_attention_mask(self, input_length_ls: List[int]) -> torch.Tensor:
         total_length = sum(input_length_ls)
         attention_mask = torch.full((1, 1, total_length, total_length), torch.finfo(self.dtype).min)
 
@@ -337,7 +337,7 @@ class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
 
         return attention_mask
 
-    def _process_features(self, features_ls):
+    def _process_features(self, features_ls: List[dict]) -> tuple:
         input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
         for features in features_ls:
             if self.clm:
@@ -356,7 +356,7 @@ class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
 
         return input_ids_ls, labels_ls, position_ids_ls, input_length_ls
 
-    def torch_call(self, features_ls):
+    def torch_call(self, features_ls: List[dict]) -> dict:
         input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
         for packing_ls in features_ls:
             packing_ls = [packing_ls] if isinstance(packing_ls, dict) else packing_ls
