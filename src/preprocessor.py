@@ -219,10 +219,10 @@ def processing_datasets(
             train_dataset_ls.append(dataset)
 
         if dataset_key in train_args.valid_dataset_prefix and train_args.do_eval:
-            valid_dataset_ls.append(dataset)
+            valid_dataset_ls.append({f"{repo_name}/{dataset_key}": dataset})
 
         if dataset_key in train_args.test_dataset_prefix and train_args.do_predict:
-            test_dataset_ls.append(dataset)
+            test_dataset_ls.append({f"{repo_name}/{dataset_key}": dataset})
 
         if train_args.is_world_process_zero:
             length_ls = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
@@ -287,18 +287,35 @@ def processing_datasets(
             )
 
     train_dataset = concat(train_dataset_ls, "train")
-    valid_dataset = concat(valid_dataset_ls, "valid")
-    test_dataset = concat(test_dataset_ls, "test")
+    valid_dataset = concat(valid_dataset_ls, "valid") if isinstance(valid_dataset_ls[0], Dataset) else valid_dataset_ls
+    test_dataset = concat(test_dataset_ls, "test") if isinstance(test_dataset_ls[0], Dataset) else test_dataset_ls
 
     if train_args.is_world_process_zero and train_dataset:
         logger.info("train-datasets")
         range_histogram(train_dataset["length"], 100, 50)
+
     if train_args.is_world_process_zero and valid_dataset:
         logger.info("valid-datasets")
-        range_histogram(valid_dataset["length"], 100, 50)
+
+        length_ls = list()
+        if isinstance(valid_dataset[0], dict):
+            for dataset in valid_dataset:
+                length_ls.extend(list(dataset.values())[0]["length"])
+        else:
+            length_ls = valid_dataset["length"]
+
+        range_histogram(length_ls, 100, 50)
+
     if train_args.is_world_process_zero and test_dataset:
         logger.info("test-datasets")
-        range_histogram(test_dataset["length"], 100, 50)
+
+        length_ls = list()
+        if isinstance(test_dataset[0], dict):
+            for dataset in test_dataset:
+                length_ls.extend(list(dataset.values())[0]["length"])
+        else:
+            length_ls = test_dataset["length"]
+        range_histogram(length_ls, 100, 50)
 
     if train_args.is_world_process_zero:
         logger.info(f"load_dataset_time: {time.time() - start_time:.2f}")
