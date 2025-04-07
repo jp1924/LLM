@@ -13,20 +13,21 @@ logger = hf_logging.get_logger("transformers")
 
 
 def check_special_token(input_ids: np.ndarray, tokenizer: PreTrainedTokenizer) -> np.ndarray:
-    num_eos_token = np.count_nonzero(input_ids == tokenizer.eos_token_id)
-    num_bos_token = np.count_nonzero(input_ids == tokenizer.bos_token_id)
+    if tokenizer.eos_token_id:
+        num_eos_token = np.count_nonzero(input_ids == tokenizer.eos_token_id)
+        if num_eos_token == 0:
+            input_ids = np.append(input_ids, tokenizer.eos_token_id)
+        elif num_eos_token >= 2:
+            input_ids = input_ids[input_ids != tokenizer.eos_token_id]
+            input_ids = np.append(input_ids, tokenizer.eos_token_id)
 
-    if num_eos_token == 0:
-        input_ids = np.append(input_ids, tokenizer.eos_token_id)
-    elif num_eos_token >= 2:
-        input_ids = input_ids[input_ids != tokenizer.eos_token_id]
-        input_ids = np.append(input_ids, tokenizer.eos_token_id)
-
-    if num_bos_token == 0:
-        input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
-    elif num_bos_token >= 2:
-        input_ids = input_ids[input_ids != tokenizer.bos_token_id]
-        input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
+    if tokenizer.bos_token_id:
+        num_bos_token = np.count_nonzero(input_ids == tokenizer.bos_token_id)
+        if num_bos_token == 0:
+            input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
+        elif num_bos_token >= 2:
+            input_ids = input_ids[input_ids != tokenizer.bos_token_id]
+            input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
 
     return input_ids
 
