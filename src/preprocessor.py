@@ -1,8 +1,7 @@
-import random
-import re
 import time
 from typing import Callable, Optional, Tuple
 
+import numpy as np
 from datasets import Dataset, concatenate_datasets, load_dataset
 
 from transformers import PreTrainedTokenizer, TrainingArguments
@@ -13,24 +12,59 @@ hf_logging.set_verbosity_info()
 logger = hf_logging.get_logger("transformers")
 
 
-def check_special_token(input_ids, tokenizer):
-    input_ids
+def check_special_token(input_ids: np.ndarray, tokenizer: PreTrainedTokenizer) -> np.ndarray:
+    num_eos_token = np.count_nonzero(input_ids == tokenizer.eos_token_id)
+    num_bos_token = np.count_nonzero(input_ids == tokenizer.bos_token_id)
+
+    if num_eos_token == 0:
+        input_ids = np.append(input_ids, tokenizer.eos_token_id)
+    elif num_eos_token >= 2:
+        input_ids = input_ids[input_ids != tokenizer.eos_token_id]
+        input_ids = np.append(input_ids, tokenizer.eos_token_id)
+
+    if num_bos_token == 0:
+        input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
+    elif num_bos_token >= 2:
+        input_ids = input_ids[input_ids != tokenizer.bos_token_id]
+        input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
+
     return input_ids
 
 
-def sft_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+    def train_process(row_dataset: dict) -> dict:
+        text = tokenizer.apply_chat_template(row_dataset["conversations"], tokenize=False)
+        outputs = tokenizer(text, return_tensors="np", return_length=True)
+
+        finish_data = {
+            "input_ids": check_special_token(outputs.input_ids[0], tokenizer),
+            args.length_column_name: outputs.length[0],
+        }
+        return finish_data
+
+    def test_process(row_dataset: dict) -> dict:
+        user, assistant = (
+            row_dataset["conversations"][:-2] + [row_dataset["conversations"][-2]],
+            row_dataset["conversations"][-1]["content"],
+        )
+        prompt = tokenizer.apply_chat_template(user, tokenize=False, add_generation_prompt=True)
+
+        finish_data = {
+            "prompt": prompt,
+            "answer": assistant,
+        }
+        return finish_data
+
     process_finish_ls = list()
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
-        text = tokenizer.apply_chat_template(row_dataset["conversation"], tokenize=False)
-        outputs = tokenizer(text, return_tensors="np", return_length=True)
 
-        process_finish_ls.append(
-            {
-                "input_ids": check_special_token(outputs.input_ids[0], tokenizer),
-                args.length_column_name: outputs.length[0],
-            }
-        )
+        if with_split in args.train_dataset_prefix:
+            process_finish_ls.append(train_process(row_dataset))
+        elif with_split in args.valid_dataset_prefix:
+            process_finish_ls.append(train_process(row_dataset))
+        elif with_split in args.test_dataset_prefix:
+            process_finish_ls.append(test_process(row_dataset))
 
     return_dict = dict()
     for res in process_finish_ls:
@@ -40,7 +74,7 @@ def sft_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingArgumen
     return return_dict
 
 
-def pretrain_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+def pretrain_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
     process_finish_ls = list()
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
@@ -69,7 +103,7 @@ def pretrain_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingAr
     return return_dict
 
 
-def reasoning_processor(example, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+def reasoning_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
     process_finish_ls = list()
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
@@ -233,6 +267,7 @@ def processing_datasets(
             func,
             num_proc=train_args.preprocessing_num_workers,
             load_from_cache_file=True,
+            with_split=True,
             batched=train_args.preprocessing_batched,
             cache_file_names=map_cache_file_name,
             batch_size=train_args.preprocessing_batch_size,
