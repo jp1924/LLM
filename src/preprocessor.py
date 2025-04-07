@@ -249,6 +249,12 @@ def processing_datasets(
         truncate_map = train_args.data_truncate_map.get(repo_name, {})
         datasets = load_dataset(repo_name, data_name)
 
+        prefix_ls = train_args.train_dataset_prefix + train_args.valid_dataset_prefix + train_args.test_dataset_prefix
+        for prefix in list(datasets.keys()):
+            if prefix in prefix_ls:
+                continue
+            datasets.pop(prefix, None)
+
         map_cache_file_name, filter_cache_file_name = None, None
         if train_args.cache_dir is not None:
             name = repo_name.split("/")[-1]
@@ -287,8 +293,20 @@ def processing_datasets(
             )
 
     train_dataset = concat(train_dataset_ls, "train")
-    valid_dataset = concat(valid_dataset_ls, "valid") if isinstance(valid_dataset_ls[0], Dataset) else valid_dataset_ls
-    test_dataset = concat(test_dataset_ls, "test") if isinstance(test_dataset_ls[0], Dataset) else test_dataset_ls
+
+    valid_dataset = None
+    if valid_dataset_ls:
+        if isinstance(valid_dataset_ls[0], Dataset):
+            valid_dataset = concat(valid_dataset_ls, "valid")
+        else:
+            valid_dataset = valid_dataset_ls
+
+    test_dataset = None
+    if test_dataset_ls:
+        if isinstance(test_dataset_ls[0], Dataset):
+            test_dataset = concat(test_dataset_ls, "valid")
+        else:
+            test_dataset = test_dataset_ls
 
     if train_args.is_world_process_zero and train_dataset:
         logger.info("train-datasets")
