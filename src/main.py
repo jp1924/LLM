@@ -1,7 +1,6 @@
 import json
 import logging
 import sys
-import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -172,6 +171,11 @@ class EvalPipelineArguments:
         metadata={"help": "The number of times to repeat the evaluation."},
     )
 
+    tasks: str = field(
+        default="haerae",
+        metadata={"help": "The tasks to evaluate on."},
+    )
+
 
 @dataclass
 class SFTTrainingArguments(
@@ -259,8 +263,10 @@ class SFTTrainingArguments(
         self.tokenizer_kwargs = {
             **self.tokenizer_kwargs,
             "padding_side": self.padding_side,
-            "chat_template": self.chat_template,
         }
+
+        if self.chat_template:
+            self.tokenizer_kwargs["chat_template"] = self.chat_template
 
         self.cache_dir = Path(self.cache_dir) if self.cache_dir else None
         self.model_name_or_path = self.resume_from_checkpoint or self.model_name_or_path
@@ -449,9 +455,12 @@ if "__main__" in __name__:
     )
     log_level = train_args.get_process_log_level()
     logger.setLevel(log_level)
+
     ds_logging.set_verbosity(log_level)
     hf_logging.set_verbosity(log_level)
     hf_logging.enable_default_handler()
     hf_logging.enable_explicit_format()
 
     main(train_args)
+
+    train_args
