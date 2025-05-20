@@ -329,7 +329,7 @@ def main(train_args: SFTTrainingArguments) -> None:
 
     compute_metrics = None
     if train_args.data_preprocessor_type in METRICS_REGISTRY:
-        compute_metrics = partial(METRICS_REGISTRY[train_args.data_preprocessor_type], tokenizer)
+        compute_metrics = partial(METRICS_REGISTRY[train_args.data_preprocessor_type], tokenizer=tokenizer)
 
     collator = PackingCollatorForLLM(
         model=model,
