@@ -259,19 +259,6 @@ class SFTTrainingArguments(
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
-    @property
-    def is_local_process_zero(self) -> bool:
-        return self.local_process_index == 0
-
-    @property
-    def is_world_process_zero(self) -> bool:
-        if is_sagemaker_mp_enabled():
-            import smdistributed.modelparallel.torch as smp  # type: ignore
-
-            return smp.rank() == 0
-        else:
-            return self.process_index == 0
-
 
 hf_logging.set_verbosity_info()
 logger = hf_logging.get_logger("transformers")
@@ -302,23 +289,6 @@ def main(train_args: SFTTrainingArguments) -> None:
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
     model.train()
 
-    if train_args.freeze_named_param:
-        freeze_param_ls = [param for name, param in model.named_parameters() if name in train_args.freeze_named_param]
-        if not freeze_param_ls:
-            raise ValueError("freeze_named_param에 해당하는 모듈이 없음.")
-
-        for param in freeze_param_ls:
-            param.requires_grad = False
-
-        if train_args.is_world_process_zero:
-            full_param_num = get_model_param_count(model, trainable_only=False)
-            alive_param_num = get_model_param_count(model, trainable_only=True)
-            dead_param_num = full_param_num - alive_param_num
-
-            logger.info(
-                f"얼린 파라미터 수: {dead_param_num}, 활성화된 파라미터 수: {alive_param_num}, 전체 파라미터 수: {full_param_num}"
-            )
-
     if train_args.torch_compile:
         model = torch.compile(
             model,
@@ -329,7 +299,11 @@ def main(train_args: SFTTrainingArguments) -> None:
 
     compute_metrics = None
     if train_args.data_preprocessor_type in METRICS_REGISTRY:
-        compute_metrics = partial(METRICS_REGISTRY[train_args.data_preprocessor_type], tokenizer=tokenizer)
+        compute_metrics = partial(
+            METRICS_REGISTRY[train_args.data_preprocessor_type],
+            tokenizer=tokenizer,
+            args=train_args,
+        )
 
     collator = PackingCollatorForLLM(
         model=model,
@@ -423,7 +397,7 @@ if "__main__" in __name__:
     parser = HfArgumentParser([SFTTrainingArguments])
     train_args, remain_args = parser.parse_args_into_dataclasses(return_remaining_strings=True)
 
-    if remain_args and train_args.is_world_process_zero:
+    if remain_args and train_args.distributed_state.is_local_main_process:
         logger.info(f"remain_args: {remain_args}")
 
     if train_args.seed is not None:

@@ -414,7 +414,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
 
         sample_check = self([sample_dataset[0]])
         input_ids = sample_check["input_ids"].tolist()[0]
-        if self.args.is_world_process_zero:
+        if self.args.distributed_state.is_local_main_process:
             sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
             check_labels = [self.tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
             check_labels = ", ".join(check_labels)

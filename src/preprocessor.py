@@ -301,13 +301,10 @@ def processing_datasets(
             truncate_size = truncate_map[dataset_key]
             dataset_size = len(dataset)
             dataset = dataset if dataset_size <= truncate_size else dataset.shuffle().select(range(truncate_size))
-            if dataset_size <= truncate_size and train_args.is_world_process_zero:
+            if dataset_size <= truncate_size and train_args.distributed_state.is_local_main_process:
                 logger.info(
                     f"{repo_name}의 {dataset_key}크기는 {dataset_size}이지만 truncate_size는 {truncate_size} 크기를 조절하셈."
                 )
-
-        # if train_args.is_world_process_zero:
-        #     range_histogram(dataset["length"], 100, 50)
 
         if dataset_key in train_args.train_dataset_prefix and train_args.do_train:
             dataset = dataset.filter(
@@ -327,7 +324,7 @@ def processing_datasets(
         if dataset_key in train_args.test_dataset_prefix and train_args.do_predict:
             test_dataset_ls.append(dataset)
 
-        if train_args.is_world_process_zero:
+        if train_args.distributed_state.is_local_main_process:
             length_ls = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
             length_ls = [int(length) for length in length_ls]
             logger.info(f"{repo_name}/{dataset_key}-length: {length_ls}")
@@ -337,7 +334,7 @@ def processing_datasets(
         if datasets_ls:
             dataset = concatenate_datasets(datasets_ls)
             dataset.set_format("pt")
-            if train_args.is_world_process_zero:
+            if train_args.distributed_state.is_local_main_process:
                 logger.info(f"{dataset_type}_dataset:\n{dataset}")
             return dataset
         return None
@@ -345,7 +342,7 @@ def processing_datasets(
     start_time = time.time()
     train_dataset_ls, valid_dataset_ls, test_dataset_ls = [], [], []
     for repo_name in train_args.dataset_repo_ls:
-        if train_args.is_world_process_zero:
+        if train_args.distributed_state.is_local_main_process:
             logger.info(f"load-{repo_name}")
 
         data_name = train_args.data_name_map.get(repo_name, None)
@@ -399,11 +396,11 @@ def processing_datasets(
     valid_dataset = concat(valid_dataset_ls, "valid")
     test_dataset = concat(test_dataset_ls, "test")
 
-    if train_args.is_world_process_zero and train_dataset:
+    if train_args.distributed_state.is_local_main_process and train_dataset:
         logger.info("train-datasets")
         range_histogram(train_dataset["length"], 100, 50)
 
-    if train_args.is_world_process_zero:
+    if train_args.distributed_state.is_local_main_process:
         logger.info(f"load_dataset_time: {time.time() - start_time:.2f}")
 
     return train_dataset, valid_dataset, test_dataset
