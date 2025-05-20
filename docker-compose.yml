@@ -19,12 +19,6 @@ services:
       - LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
       - WANDB_API_KEY=${WANDB_API_KEY}
       - HF_TOKEN=${HF_TOKEN}
+      - NVIDIA_VISIBLE_DEVICES=0,1,2,3
     cap_drop:
       - SYS_ADMIN
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
