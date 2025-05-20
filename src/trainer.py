@@ -1,15 +1,21 @@
+import contextlib
 import random
 from collections import defaultdict
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from datasets import Dataset
+from torch import nn
+from torch.distributed.fsdp import FullyShardedDataParallel
 from torch.utils.data import DataLoader, RandomSampler, Sampler
-from trl.trainer.utils import DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer
 
-from transformers import Trainer, TrainingArguments
+from transformers import Seq2SeqTrainer, TrainingArguments
 from transformers import logging as hf_logging
+from transformers.data.data_collator import DataCollatorMixin
+from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
+from transformers.integrations.fsdp import is_fsdp_managed_module
 from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.trainer_utils import has_length, seed_worker
 from transformers.utils import is_datasets_available
@@ -26,7 +32,6 @@ class PackingSampler(Sampler):
         lengths: List[int],
         max_seq_len: int,
         max_seq_per_pack: int,
-        do_shuffle: bool = True,
     ):
         self.dataset = dataset
 
@@ -36,12 +41,10 @@ class PackingSampler(Sampler):
             max_seq_per_pack=max_seq_per_pack,
         )
 
-        self.do_shuffle = do_shuffle
         self.lengths = lengths
-
         self.packing_sample_ls = self._transform_length_to_indices(
             strategies_per_length=self.packing_strategies,
-            lengths=lengths,
+            lengths=self.lengths,
         )
 
     def _get_packing_strategies(
@@ -121,8 +124,7 @@ class PackingSampler(Sampler):
 
         for length in unique_lengths:
             dataset_idx_ls = np.where(length_array == length)[0].tolist()
-            if self.do_shuffle:
-                random.shuffle(dataset_idx_ls)
+            random.shuffle(dataset_idx_ls)
             length_to_indices[length] = dataset_idx_ls
 
         pack_strategies_ls = [
@@ -147,19 +149,15 @@ class PackingSampler(Sampler):
 
             packing_sample_ls.append(dataset_idx_ls)
 
-        if self.do_shuffle:
-            random.shuffle(packing_sample_ls)
+        random.shuffle(packing_sample_ls)
 
         return packing_sample_ls
 
     def __iter__(self):
-        if self.do_shuffle:
-            packing_sample_ls = self._transform_length_to_indices(
-                strategies_per_length=self.packing_strategies,
-                lengths=self.lengths,
-            )
-        else:
-            packing_sample_ls = self.packing_sample_ls
+        packing_sample_ls = self._transform_length_to_indices(
+            strategies_per_length=self.packing_strategies,
+            lengths=self.lengths,
+        )
 
         return iter(packing_sample_ls)
 
@@ -167,7 +165,23 @@ class PackingSampler(Sampler):
         return len(self.packing_sample_ls)
 
 
-class PackingTrainer(Trainer):
+class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
+    def __init__(
+        self,
+        args,
+        **kwargs,
+    ) -> None:
+        setattr(args, "dataset_kwargs", {"skip_prepare_dataset": True})
+        setattr(args, "padding_free", False)
+        SFTTrainer.__init__(
+            self,
+            args=args,
+            **kwargs,
+        )
+        if self.args.generation_config is not None:
+            gen_config = self.load_generation_config(self.args.generation_config)
+            self.model.generation_config = gen_config
+
     def get_train_dataloader(self) -> DataLoader:
         """
         Returns the training [`~torch.utils.data.DataLoader`].
@@ -264,63 +278,152 @@ class PackingTrainer(Trainer):
                 lengths=lengths,
                 max_seq_len=self.args.data_max_length,
                 max_seq_per_pack=self.args.packing_max_elem,
-                do_shuffle=self.args.packing_shuffle,
             )
 
         else:
             return RandomSampler(self.train_dataset)
 
+    def prediction_step(
+        self,
+        model: nn.Module,
+        inputs: Dict[str, Union[torch.Tensor, Any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[List[str]] = None,
+        **gen_kwargs,
+    ) -> Tuple[Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Perform an evaluation step on `model` using `inputs`.
 
-class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
+        Subclass and override to inject custom behavior.
+
+        Args:
+            model (`nn.Module`):
+                The model to evaluate.
+            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
+                The inputs and targets of the model.
+
+                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                argument `labels`. Check your model's documentation for all accepted arguments.
+            prediction_loss_only (`bool`):
+                Whether or not to return the loss only.
+            gen_kwargs:
+                Additional `generate` specific kwargs.
+
+        Return:
+            Tuple[Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple with the loss, logits and
+            labels (each being optional).
+        """
+
+        if not self.args.predict_with_generate or prediction_loss_only:
+            return super(Seq2SeqTrainer, self).prediction_step(
+                model, inputs, prediction_loss_only=prediction_loss_only, ignore_keys=ignore_keys
+            )
+
+        use_labels_at_compute_loss = False
+        compute_loss = "labels" in inputs and use_labels_at_compute_loss
+        has_labels = "labels" in inputs
+        inputs = self._prepare_inputs(inputs)
+
+        # Priority (handled in generate):
+        # non-`None` gen_kwargs > model.generation_config > default GenerationConfig()
+        if len(gen_kwargs) == 0 and hasattr(self, "_gen_kwargs"):
+            gen_kwargs = self._gen_kwargs.copy()
+        if "num_beams" in gen_kwargs and gen_kwargs["num_beams"] is None:
+            gen_kwargs.pop("num_beams")
+        if "max_length" in gen_kwargs and gen_kwargs["max_length"] is None:
+            gen_kwargs.pop("max_length")
+
+        default_synced_gpus = is_deepspeed_zero3_enabled() or is_fsdp_managed_module(self.model)
+        gen_kwargs["synced_gpus"] = gen_kwargs.get("synced_gpus", default_synced_gpus)
+
+        generation_inputs = inputs.copy()
+        # If the `decoder_input_ids` was created from `labels`, evict the former, so that the model can freely generate
+        # (otherwise, it would continue generating from the padded `decoder_input_ids`)
+        if (
+            "labels" in generation_inputs
+            and "decoder_input_ids" in generation_inputs
+            and generation_inputs["labels"].shape == generation_inputs["decoder_input_ids"].shape
+            and use_labels_at_compute_loss
+        ):
+            generation_inputs = {
+                k: v for k, v in inputs.items() if k not in ("decoder_input_ids", "decoder_attention_mask")
+            }
+
+        summon_full_params_context = (
+            FullyShardedDataParallel.summon_full_params(self.model)
+            if isinstance(self.model, FullyShardedDataParallel)
+            else contextlib.nullcontext()
+        )
+
+        with summon_full_params_context:
+            generated_tokens = self.model.generate(**generation_inputs, **gen_kwargs)
+
+        # Temporary hack to ensure the generation config is not initialized for each iteration of the evaluation loop
+        # TODO: remove this hack when the legacy code that initializes generation_config from a model config is
+        # removed in https://github.com/huggingface/transformers/blob/98d88b23f54e5a23e741833f1e973fdf600cc2c5/src/transformers/generation/utils.py#L1183
+        if self.model.generation_config._from_model_config:
+            self.model.generation_config._from_model_config = False
+
+        # Retrieves GenerationConfig from model.generation_config
+        gen_config = self.model.generation_config
+        # in case the batch is shorter than max length, the output should be padded
+        if generated_tokens.shape[-1] < gen_config.max_length:
+            generated_tokens = self._pad_tensors_to_max_len(generated_tokens, gen_config.max_length)
+        elif gen_config.max_new_tokens is not None and generated_tokens.shape[-1] < gen_config.max_new_tokens + 1:
+            generated_tokens = self._pad_tensors_to_max_len(generated_tokens, gen_config.max_new_tokens + 1)
+
+        with torch.no_grad():
+            if compute_loss:
+                with self.compute_loss_context_manager():
+                    outputs = model(**inputs)
+                if self.label_smoother is not None:
+                    loss = self.label_smoother(outputs, inputs["labels"]).mean().detach()
+                else:
+                    loss = (outputs["loss"] if isinstance(outputs, dict) else outputs[0]).mean().detach()
+            else:
+                loss = None
+
+        if compute_loss and self.args.prediction_loss_only:
+            return loss, None, None
+
+        if has_labels:
+            labels = inputs["labels"]
+            if labels.shape[-1] < gen_config.max_length:
+                labels = self._pad_tensors_to_max_len(labels, gen_config.max_length)
+            elif gen_config.max_new_tokens is not None and labels.shape[-1] < gen_config.max_new_tokens + 1:
+                labels = self._pad_tensors_to_max_len(labels, gen_config.max_new_tokens + 1)
+        else:
+            labels = None
+
+        return loss, generated_tokens, labels
+
+
+class PackingCollatorForLLM(DataCollatorMixin):
     def __init__(
         self,
         args: TrainingArguments,
-        dtype: torch.dtype,
-        clm: bool = False,
+        model,
+        tokenizer,
         sample_dataset: Optional[Dataset] = None,
-        **kwargs,
+        return_tensors: Optional[str] = "pt",
     ) -> None:
-        super().__init__(**kwargs)
-        self.dtype = dtype
         self.args = args
-        self.clm = clm
-
-        if not self.clm and (sample_dataset and args.is_world_process_zero):
-            formated_instruct = self.tokenizer.decode(sample_dataset[0]["input_ids"], skip_special_tokens=False)
-            logger.info(f"formated_instruct: {formated_instruct}")
-
-            if args.response_template is not None:
-                response_template = self.tokenizer.decode(args.response_template, skip_special_tokens=False)
-                logger.info(f"response_template: {response_template}")
-                if response_template not in formated_instruct:
-                    raise ValueError("이거 response_template이 formated_instruct에 포함되어 있지 않음. 다시 설정하셈")
-            else:
-                raise logger.error("response_template이 없음. 다시 설정하셈.")
-
-            if args.instruction_template is not None:
-                instruction_template = self.tokenizer.decode(args.instruction_template, skip_special_tokens=False)
-                logger.info(f"instruction_template: {instruction_template}")
-                if instruction_template not in formated_instruct:
-                    raise ValueError(
-                        "이거 instruction_template이 formated_instruct에 포함되어 있지 않음. 다시 설정하셈"
-                    )
-            else:
-                logger.warning("instruction_template이 없음. 근데 애러는 발생하지 않고 그냥 패스함.")
+        self.model = model
+        self.return_tensors = return_tensors
+        self.tokenizer = tokenizer
 
         sample_check = self([sample_dataset[0]])
+        input_ids = sample_check["input_ids"].tolist()[0]
         if self.args.is_world_process_zero:
             sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
             check_labels = [self.tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
             check_labels = ", ".join(check_labels)
             logger.info(f"collator_label: [-100,  ..., -100, {check_labels}]")
 
-        if (
-            self.tokenizer.bos_token_id is not None
-            and self.tokenizer.bos_token_id not in sample_check["input_ids"].tolist()[0]
-        ):
+        if self.tokenizer.bos_token_id and self.tokenizer.bos_token_id not in input_ids:
             raise ValueError("BOS token이 없다. 이거 다시 전처리 해라.")
 
-        if self.tokenizer.eos_token_id not in sample_check["input_ids"].tolist()[0]:
+        if self.tokenizer.eos_token_id not in input_ids:
             raise ValueError("EOS token이 없다. 이거 다시 전처리 해라.")
 
     def _create_attention_mask(self, input_length_ls: List[int]) -> torch.Tensor:
@@ -337,42 +440,53 @@ class PackingCollatorForCompletionOnlyLM(DataCollatorForCompletionOnlyLM):
 
         return attention_mask
 
-    def _process_features(self, features_ls: List[dict]) -> tuple:
-        input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
-        for features in features_ls:
-            if self.clm:
-                input_ids = features["input_ids"]
-                labels = input_ids.clone()
-                length = len(input_ids)
-            else:
-                batch = super().torch_call([features])
-                input_ids, labels = batch.input_ids[0], batch.labels[0]
-                length = len(input_ids)
-
-            labels_ls.append(labels)
-            input_ids_ls.append(input_ids)
-            input_length_ls.append(length)
-            position_ids_ls.append(torch.arange(length))
-
-        return input_ids_ls, labels_ls, position_ids_ls, input_length_ls
-
-    def torch_call(self, features_ls: List[dict]) -> dict:
+    def torch_call(
+        self,
+        features_ls: List[dict],
+    ) -> dict:
         input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
         for packing_ls in features_ls:
             packing_ls = [packing_ls] if isinstance(packing_ls, dict) else packing_ls
-            ids, labels, positions, lengths = self._process_features(packing_ls)
-            input_ids_ls.extend(ids)
-            labels_ls.extend(labels)
-            position_ids_ls.extend(positions)
-            input_length_ls.extend(lengths)
+            for features in packing_ls:
+                if self.model.training:
+                    length = len(features["input_ids"])
 
-        batch = {
-            "labels": torch.concat(labels_ls)[None],
-            "input_ids": torch.concat(input_ids_ls)[None],
-            "position_ids": torch.concat(position_ids_ls)[None],
-        }
+                    # input_ids_ls.append({"input_ids": features["input_ids"]})
+                    # labels_ls.append({"input_ids": features["labels"]})
+                    input_ids_ls.append(features["input_ids"])
+                    labels_ls.append(features["labels"])
+                    position_ids_ls.append(torch.arange(length))
+                    input_length_ls.append(length)
+                else:
+                    input_ids_ls.append({"input_ids": features["input_ids"]})
+                    labels_ls.append({"input_ids": features["labels"]})
 
-        if self.args.attn_implementation == "eager":
+        batch = dict()
+        if input_ids_ls and self.model.training:
+            # output = self.tokenizer.pad(input_ids_ls, padding_side="left", return_tensors="pt")
+            # batch["input_ids"] = output.input_ids
+            # batch["attention_mask"] = output.attention_mask
+            batch["input_ids"] = torch.concat(input_ids_ls)[None]
+        else:
+            output = self.tokenizer.pad(input_ids_ls, padding_side="left", return_tensors="pt")
+            batch["input_ids"] = output.input_ids
+            batch["attention_mask"] = output.attention_mask
+
+        if labels_ls and self.model.training:
+            # output = self.tokenizer.pad(labels_ls, padding_side="left", return_tensors="pt")
+            # for idx, (input_ids, attention_mask) in enumerate(zip(output.input_ids, output.attention_mask)):
+            #     input_ids[attention_mask == 0] = -100
+            #     output.input_ids[idx] = input_ids
+            # batch["labels"] = output.input_ids
+            batch["labels"] = torch.concat(labels_ls)[None]
+        else:
+            output = self.tokenizer.pad(labels_ls, padding_side="left", return_tensors="pt")
+            batch["labels"] = output.input_ids
+
+        if position_ids_ls and self.model.training:
+            batch["position_ids"] = torch.concat(position_ids_ls)[None]
+
+        if self.args.attn_implementation == "eager" and self.model.training:
             batch["attention_mask"] = self._create_attention_mask(input_length_ls)
 
         return batch
