@@ -1,9 +1,15 @@
+import numpy as np
+import wandb
 from evaluate import load
 
-from transformers import EvalPrediction, PreTrainedTokenizer
+from transformers import EvalPrediction, PreTrainedTokenizer, TrainingArguments
 
 
-def compute_tnt_metrics(eval_pred: EvalPrediction, tokenizer: PreTrainedTokenizer) -> dict[str, float]:
+def compute_tnt_metrics(
+    eval_pred: EvalPrediction,
+    tokenizer: PreTrainedTokenizer,
+    args: TrainingArguments,
+) -> dict[str, float]:
     eval_pred.predictions[eval_pred.predictions == -100] = tokenizer.pad_token_id
     preds, labels = (
         [
@@ -16,11 +22,22 @@ def compute_tnt_metrics(eval_pred: EvalPrediction, tokenizer: PreTrainedTokenize
         ],
     )
 
-    bleu, rouge = load("evaluate-metric/bleu"), load("evaluate-metric/rouge")
-    bleu_scores = bleu.compute(predictions=preds, references=labels, tokenizer=lambda x: tokenizer.tokenize(x))
-    rouge_scores = rouge.compute(predictions=preds, references=labels, tokenizer=lambda x: tokenizer.tokenize(x))
+    wer_score_ls, cer_score_ls = [], []
+    predictions_table = wandb.Table(columns=["Prediction", "Label", "WER", "CER"])
+    wer, cer = load("evaluate-metric/wer"), load("evaluate-metric/cer")
 
-    return {"bleu": bleu_scores["bleu"], **rouge_scores}
+    for pred, label in zip(preds, labels):
+        wer_scores = wer.compute(predictions=preds, references=labels)
+        cer_scores = cer.compute(predictions=preds, references=labels)
+        wer_score_ls.append(wer_scores)
+        cer_score_ls.append(cer_scores)
+        predictions_table.add_data(pred, label, wer_scores, cer_scores)
+
+    return {
+        "wer": np.mean(wer_score_ls),
+        "cer": np.mean(cer_score_ls),
+        "predictions_result": predictions_table,
+    }
 
 
 METRICS_REGISTRY = {
