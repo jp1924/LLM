@@ -3,6 +3,7 @@ import logging
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -11,16 +12,18 @@ from accelerate import ProfileKwargs
 from datasets import Dataset
 from datasets import logging as ds_logging
 from setproctitle import setproctitle
+from trl import SFTConfig
 
 import optimization
+from metrics import METRICS_REGISTRY
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
-from trainer import PackingCollatorForCompletionOnlyLM, PackingTrainer
+from trainer import PackingCollatorForLLM, PackingTrainer
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
     HfArgumentParser,
-    TrainingArguments,
+    Seq2SeqTrainingArguments,
     set_seed,
 )
 from transformers import logging as hf_logging
@@ -93,14 +96,6 @@ class TrainPipelineArguments:
         default=None,
         metadata={"help": "The name or path of the pre-trained model."},
     )
-    response_template: str = field(
-        default=None,
-        metadata={"help": "The template for generating responses."},
-    )
-    instruction_template: str = field(
-        default=None,
-        metadata={"help": "The template for generating instructions."},
-    )
     attn_implementation: str = field(
         default="eager",
         metadata={"help": "The attention implementation to use. Options: 'eager', 'flash_attention_2'."},
@@ -170,7 +165,6 @@ class EvalPipelineArguments:
         default=5,
         metadata={"help": "The number of times to repeat the evaluation."},
     )
-
     tasks: str = field(
         default="haerae",
         metadata={"help": "The tasks to evaluate on."},
@@ -179,15 +173,8 @@ class EvalPipelineArguments:
 
 @dataclass
 class SFTTrainingArguments(
-    DataPipelineArguments,
-    TrainPipelineArguments,
-    EvalPipelineArguments,
-    TrainingArguments,
+    DataPipelineArguments, TrainPipelineArguments, EvalPipelineArguments, Seq2SeqTrainingArguments, SFTConfig
 ):
-    output_dir: str = field(
-        default=None,
-        metadata={"help": "The output directory where the model predictions and checkpoints will be written."},
-    )
     lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")
 
     def __post_init__(self):
@@ -222,8 +209,6 @@ class SFTTrainingArguments(
             "profiling_kwargs",
         ]
         _VALID_LIST_FIELDS = [
-            "instruction_template",
-            "response_template",
             "train_dataset_prefix",
             "valid_dataset_prefix",
             "test_dataset_prefix",
@@ -315,6 +300,7 @@ def main(train_args: SFTTrainingArguments) -> None:
 
     model_kwargs = {"config": config, **train_args.model_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
+    model.train()
 
     if train_args.freeze_named_param:
         freeze_param_ls = [param for name, param in model.named_parameters() if name in train_args.freeze_named_param]
@@ -341,23 +327,16 @@ def main(train_args: SFTTrainingArguments) -> None:
             fullgraph=True,
         )
 
-    collator = PackingCollatorForCompletionOnlyLM(
+    compute_metrics = None
+    if train_args.data_preprocessor_type in METRICS_REGISTRY:
+        compute_metrics = partial(METRICS_REGISTRY[train_args.data_preprocessor_type], tokenizer)
+
+    collator = PackingCollatorForLLM(
+        model=model,
         tokenizer=tokenizer,
-        response_template=train_args.response_template,
-        instruction_template=train_args.instruction_template,
         args=train_args,
-        dtype=model.dtype,
-        clm=train_args.data_preprocessor_type == "pretrain",
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
-
-    callbacks = None
-    if train_args.do_logic_kor_at_save:
-        from callbacks import LogicKorCallback
-
-        callbacks = [LogicKorCallback()]
-
-        logger.info("아직 구현중인 기능\n" * 10)
 
     trainer = PackingTrainer(
         model=model,
@@ -366,7 +345,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         processing_class=tokenizer,
         data_collator=collator,
         args=train_args,
-        callbacks=callbacks,
+        compute_metrics=compute_metrics,
     )
 
     if train_args.do_train and train_dataset:
@@ -380,11 +359,13 @@ def main(train_args: SFTTrainingArguments) -> None:
 
 
 def train(trainer: PackingTrainer, args: SFTTrainingArguments) -> None:
+    from transformers.trainer_utils import TrainOutput
+
     context = trainer.accelerator.profile(ProfileKwargs(**args.profiling_kwargs)) if args.profiling else nullcontext()
 
     with context as prof:
         try:
-            trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+            outputs: TrainOutput = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
         finally:
             if args.save_finally:
                 try:
@@ -398,6 +379,9 @@ def train(trainer: PackingTrainer, args: SFTTrainingArguments) -> None:
         prof.export_chrome_trace(save_path.with_suffix(".chrome_trace.json").as_posix())
         print(prof.key_averages().table(sort_by="flops", row_limit=10))
         print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
+
+    trainer.log_metrics("train", outputs.metrics)
+    trainer.save_metrics("train", outputs.metrics)
 
 
 @torch.no_grad()
@@ -461,6 +445,6 @@ if "__main__" in __name__:
     hf_logging.enable_default_handler()
     hf_logging.enable_explicit_format()
 
-    main(train_args)
+    torch.cuda.set_per_process_memory_fraction(0.3, train_args.local_process_index)
 
-    train_args
+    main(train_args)
