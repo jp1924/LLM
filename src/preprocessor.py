@@ -12,60 +12,46 @@ hf_logging.set_verbosity_info()
 logger = hf_logging.get_logger("transformers")
 
 
-def check_special_token(input_ids: np.ndarray, tokenizer: PreTrainedTokenizer) -> np.ndarray:
-    if tokenizer.eos_token_id:
-        num_eos_token = np.count_nonzero(input_ids == tokenizer.eos_token_id)
-        if num_eos_token == 0:
-            input_ids = np.append(input_ids, tokenizer.eos_token_id)
-        elif num_eos_token >= 2:
-            input_ids = input_ids[input_ids != tokenizer.eos_token_id]
-            input_ids = np.append(input_ids, tokenizer.eos_token_id)
-
-    if tokenizer.bos_token_id:
-        num_bos_token = np.count_nonzero(input_ids == tokenizer.bos_token_id)
-        if num_bos_token == 0:
-            input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
-        elif num_bos_token >= 2:
-            input_ids = input_ids[input_ids != tokenizer.bos_token_id]
-            input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
-
-    return input_ids
-
-
 def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
-    def train_process(row_dataset: dict) -> dict:
-        text = tokenizer.apply_chat_template(row_dataset["conversations"], tokenize=False)
-        outputs = tokenizer(text, return_tensors="np", return_length=True)
-
-        finish_data = {
-            "input_ids": check_special_token(outputs.input_ids[0], tokenizer),
-            args.length_column_name: outputs.length[0],
-        }
-        return finish_data
-
-    def test_process(row_dataset: dict) -> dict:
-        user, assistant = (
-            row_dataset["conversations"][:-2] + [row_dataset["conversations"][-2]],
-            row_dataset["conversations"][-1]["content"],
-        )
-        prompt = tokenizer.apply_chat_template(user, tokenize=False, add_generation_prompt=True)
-
-        finish_data = {
-            "prompt": prompt,
-            "answer": assistant,
-        }
-        return finish_data
-
     process_finish_ls = list()
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
+        for chat_turn in row_dataset["conversations"]:
+            chat_turn["content"] = chat_turn["content"].strip()
 
+        inst, text, labels = (
+            row_dataset["conversations"][:-1],
+            row_dataset["conversations"],
+            row_dataset["conversations"][-1]["content"],
+        )
+        # chat format encoding
+        inst: np.ndarray = tokenizer.apply_chat_template(inst, apply_conversation_template=True, return_tensors="np")
+        text: np.ndarray = tokenizer.apply_chat_template(text, return_tensors="np")
+        labels: np.ndarray = tokenizer.encode(labels, return_tensors="np", add_special_tokens=False)
+        inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
+
+        # verify special token
+        if np.isin(text, tokenizer.eos_token_id).any():
+            text = np.append(text, tokenizer.eos_token_id)
+        if np.isin(text, tokenizer.bos_token_id).any():
+            text = np.insert(text, 0, tokenizer.bos_token_id)
+            inst = np.insert(inst, 0, tokenizer.bos_token_id)
+
+        finish_data = {}
         if with_split in args.train_dataset_prefix:
-            process_finish_ls.append(train_process(row_dataset))
-        elif with_split in args.valid_dataset_prefix:
-            process_finish_ls.append(train_process(row_dataset))
-        elif with_split in args.test_dataset_prefix:
-            process_finish_ls.append(test_process(row_dataset))
+            labels = text.copy()
+            labels[: len(inst)] = -100
+
+            finish_data["input_ids"] = text
+            finish_data["labels"] = labels
+            finish_data[args.length_column_name] = len(text)
+
+        elif with_split in args.valid_dataset_prefix + args.test_dataset_prefix:
+            finish_data["input_ids"] = inst
+            finish_data["labels"] = labels
+            finish_data[args.length_column_name] = len(inst)
+
+        process_finish_ls.append(finish_data)
 
     return_dict = dict()
     for res in process_finish_ls:
@@ -75,25 +61,21 @@ def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args
     return return_dict
 
 
-def pretrain_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+def pretrain_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
     process_finish_ls = list()
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
+        sentence = row_dataset["sentence_ls" if "sentence_ls" in row_dataset else "sentence"]
+        outputs = tokenizer(sentence, return_length=True, return_tensors="np")
+        input_ids_ls, length_ls = outputs.input_ids, outputs.length
 
-        if "sentence_ls" in row_dataset:
-            for sentence in row_dataset["sentence_ls"]:
-                outputs = tokenizer(sentence, return_length=True)
-                finish_data = {
-                    "input_ids": check_special_token(outputs.input_ids, tokenizer),
-                    args.length_column_name: outputs.length[0],
-                }
-                process_finish_ls.append(finish_data)
-        else:
-            outputs = tokenizer(row_dataset["sentence"], return_length=True)
-            finish_data = {
-                "input_ids": check_special_token(outputs.input_ids, tokenizer),
-                args.length_column_name: outputs.length[0],
-            }
+        for input_ids, length in zip(input_ids_ls, length_ls):
+            if np.isin(input_ids, tokenizer.eos_token_id).any():
+                input_ids = np.append(input_ids, tokenizer.eos_token_id)
+            if np.isin(input_ids, tokenizer.bos_token_id).any():
+                input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
+
+            finish_data = {"input_ids": input_ids, args.length_column_name: length}
             process_finish_ls.append(finish_data)
 
     return_dict = dict()
@@ -104,31 +86,149 @@ def pretrain_processor(example, with_split: str, tokenizer: PreTrainedTokenizer,
     return return_dict
 
 
-def reasoning_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+def tnt_dual_script(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
     process_finish_ls = list()
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
-
         conversations = [
-            {"role": "user", "content": [{"type": "text", "text": row_dataset["question"]}]},
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "think", "text": row_dataset["reasoning"]},
-                    {"type": "text", "text": row_dataset["response"]},
-                ],
-            },
+            {"role": "spelling", "content": row_dataset["spelling"]},
+            {"role": "phonetic", "content": row_dataset["phonetic"]},
+            {"role": "dual_script", "content": row_dataset["sentence"]},
         ]
+        inst, text, labels = (conversations[:-1], conversations, conversations[-1]["content"])
+        # chat format encoding
+        inst: np.ndarray = tokenizer.apply_chat_template(inst, apply_conversation_template=True, return_tensors="np")
+        text: np.ndarray = tokenizer.apply_chat_template(text, return_tensors="np")
+        labels: np.ndarray = tokenizer.encode(labels, return_tensors="np", add_special_tokens=False)
+        inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
 
-        text = tokenizer.apply_chat_template(conversations, tokenize=False)
-        outputs = tokenizer(text, return_tensors="np", return_length=True)
+        # verify special token
+        if np.isin(text, tokenizer.eos_token_id).any():
+            text = np.append(text, tokenizer.eos_token_id)
+        if np.isin(text, tokenizer.bos_token_id).any():
+            text = np.insert(text, 0, tokenizer.bos_token_id)
+            inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
-        process_finish_ls.append(
-            {
-                "input_ids": check_special_token(outputs.input_ids[0], tokenizer),
-                args.length_column_name: outputs.length[0],
-            }
-        )
+        finish_data = {}
+        if with_split in args.train_dataset_prefix:
+            finish_data["input_ids"] = text
+            finish_data["labels"] = text.copy()
+            finish_data[args.length_column_name] = len(text)
+        elif with_split in args.valid_dataset_prefix + args.test_dataset_prefix:
+            finish_data["input_ids"] = inst
+            finish_data["labels"] = labels
+            finish_data[args.length_column_name] = len(inst)
+
+        process_finish_ls.append(finish_data)
+
+    return_dict = dict()
+    for res in process_finish_ls:
+        for key, value in res.items():
+            return_dict.setdefault(key, []).append(value)
+
+    return return_dict
+
+
+def s2p_tnt_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+    process_finish_ls = list()
+    for row_dataset in list(zip(*[example[key] for key in example])):
+        row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
+        conversations = [
+            {"role": "spelling", "content": row_dataset["spelling"]},
+            {"role": "phonetic", "content": row_dataset["phonetic"]},
+        ]
+        inst, text, labels = (conversations[:-1], conversations, conversations[-1]["content"])
+        # chat format encoding
+        inst: np.ndarray = tokenizer.apply_chat_template(inst, apply_conversation_template=True, return_tensors="np")
+        text: np.ndarray = tokenizer.apply_chat_template(text, return_tensors="np")
+        labels: np.ndarray = tokenizer.encode(labels, return_tensors="np", add_special_tokens=False)
+        inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
+
+        # verify special token
+        if np.isin(text, tokenizer.eos_token_id).any():
+            text = np.append(text, tokenizer.eos_token_id)
+        if np.isin(text, tokenizer.bos_token_id).any():
+            text = np.insert(text, 0, tokenizer.bos_token_id)
+            inst = np.insert(inst, 0, tokenizer.bos_token_id)
+
+        finish_data = {}
+        if with_split in args.train_dataset_prefix:
+            finish_data["input_ids"] = text
+            finish_data["labels"] = text.copy()
+            finish_data[args.length_column_name] = len(text)
+        elif with_split in args.valid_dataset_prefix + args.test_dataset_prefix:
+            finish_data["input_ids"] = inst
+            finish_data["labels"] = labels
+            finish_data[args.length_column_name] = len(inst)
+
+        process_finish_ls.append(finish_data)
+
+    return_dict = dict()
+    for res in process_finish_ls:
+        for key, value in res.items():
+            return_dict.setdefault(key, []).append(value)
+
+    return return_dict
+
+
+def p2s_tnt_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+    process_finish_ls = list()
+    for row_dataset in list(zip(*[example[key] for key in example])):
+        row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
+        conversations = [
+            {"role": "phonetic", "content": row_dataset["phonetic"]},
+            {"role": "spelling", "content": row_dataset["spelling"]},
+        ]
+        inst, text, labels = (conversations[:-1], conversations, conversations[-1]["content"])
+        # chat format encoding
+        inst: np.ndarray = tokenizer.apply_chat_template(inst, apply_conversation_template=True, return_tensors="np")
+        text: np.ndarray = tokenizer.apply_chat_template(text, return_tensors="np")
+        labels: np.ndarray = tokenizer.encode(labels, return_tensors="np", add_special_tokens=False)
+        inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
+
+        # verify special token
+        if np.isin(text, tokenizer.eos_token_id).any():
+            text = np.append(text, tokenizer.eos_token_id)
+        if np.isin(text, tokenizer.bos_token_id).any():
+            text = np.insert(text, 0, tokenizer.bos_token_id)
+            inst = np.insert(inst, 0, tokenizer.bos_token_id)
+
+        finish_data = {}
+        if with_split in args.train_dataset_prefix:
+            finish_data["input_ids"] = text
+            finish_data["labels"] = text.copy()
+            finish_data[args.length_column_name] = len(text)
+        elif with_split in args.valid_dataset_prefix + args.test_dataset_prefix:
+            finish_data["input_ids"] = inst
+            finish_data["labels"] = labels
+            finish_data[args.length_column_name] = len(inst)
+
+        process_finish_ls.append(finish_data)
+
+    return_dict = dict()
+    for res in process_finish_ls:
+        for key, value in res.items():
+            return_dict.setdefault(key, []).append(value)
+
+    return return_dict
+
+
+def all_tnt_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+    process_finish_ls = list()
+
+    s2p_tnt_token = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+    s2p_tnt = s2p_tnt_processor(example, with_split, tokenizer, args)
+    s2p_tnt["input_ids"] = [np.insert(input_ids, 0, s2p_tnt_token) for input_ids in s2p_tnt["input_ids"]]
+    for row_dataset in list(zip(*[s2p_tnt[key] for key in s2p_tnt])):
+        row_dataset = {key: value for key, value in zip(s2p_tnt.keys(), row_dataset)}  # noqa: C416
+        process_finish_ls.append(row_dataset)
+
+    p2s_tnt_token = tokenizer.convert_tokens_to_ids("<|video_pad|>")
+    p2s_tnt = p2s_tnt_processor(example, with_split, tokenizer, args)
+    p2s_tnt["input_ids"] = [np.insert(input_ids, 0, p2s_tnt_token) for input_ids in p2s_tnt["input_ids"]]
+    for row_dataset in list(zip(*[p2s_tnt[key] for key in p2s_tnt])):
+        row_dataset = {key: value for key, value in zip(p2s_tnt.keys(), row_dataset)}  # noqa: C416
+        process_finish_ls.append(row_dataset)
 
     return_dict = dict()
     for res in process_finish_ls:
@@ -140,8 +240,11 @@ def reasoning_processor(example, with_split: str, tokenizer: PreTrainedTokenizer
 
 PROCESSOR_REGISTRY = {
     "sft": sft_processor,
-    "reasoning_sft": reasoning_processor,
     "pretrain": pretrain_processor,
+    "tnt_dual": tnt_dual_script,
+    "p2s_tnt": p2s_tnt_processor,
+    "s2p_tnt": s2p_tnt_processor,
+    "all_tnt": all_tnt_processor,
 }
 
 
@@ -203,8 +306,8 @@ def processing_datasets(
                     f"{repo_name}의 {dataset_key}크기는 {dataset_size}이지만 truncate_size는 {truncate_size} 크기를 조절하셈."
                 )
 
-        if train_args.is_world_process_zero:
-            range_histogram(dataset["length"], 100, 50)
+        # if train_args.is_world_process_zero:
+        #     range_histogram(dataset["length"], 100, 50)
 
         if dataset_key in train_args.train_dataset_prefix and train_args.do_train:
             dataset = dataset.filter(
@@ -219,10 +322,10 @@ def processing_datasets(
             train_dataset_ls.append(dataset)
 
         if dataset_key in train_args.valid_dataset_prefix and train_args.do_eval:
-            valid_dataset_ls.append({f"{repo_name}/{dataset_key}": dataset})
+            valid_dataset_ls.append(dataset)
 
         if dataset_key in train_args.test_dataset_prefix and train_args.do_predict:
-            test_dataset_ls.append({f"{repo_name}/{dataset_key}": dataset})
+            test_dataset_ls.append(dataset)
 
         if train_args.is_world_process_zero:
             length_ls = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
@@ -293,47 +396,12 @@ def processing_datasets(
             )
 
     train_dataset = concat(train_dataset_ls, "train")
-
-    valid_dataset = None
-    if valid_dataset_ls:
-        if isinstance(valid_dataset_ls[0], Dataset):
-            valid_dataset = concat(valid_dataset_ls, "valid")
-        else:
-            valid_dataset = valid_dataset_ls
-
-    test_dataset = None
-    if test_dataset_ls:
-        if isinstance(test_dataset_ls[0], Dataset):
-            test_dataset = concat(test_dataset_ls, "valid")
-        else:
-            test_dataset = test_dataset_ls
+    valid_dataset = concat(valid_dataset_ls, "valid")
+    test_dataset = concat(test_dataset_ls, "test")
 
     if train_args.is_world_process_zero and train_dataset:
         logger.info("train-datasets")
         range_histogram(train_dataset["length"], 100, 50)
-
-    if train_args.is_world_process_zero and valid_dataset:
-        logger.info("valid-datasets")
-
-        length_ls = list()
-        if isinstance(valid_dataset[0], dict):
-            for dataset in valid_dataset:
-                length_ls.extend(list(dataset.values())[0]["length"])
-        else:
-            length_ls = valid_dataset["length"]
-
-        range_histogram(length_ls, 100, 50)
-
-    if train_args.is_world_process_zero and test_dataset:
-        logger.info("test-datasets")
-
-        length_ls = list()
-        if isinstance(test_dataset[0], dict):
-            for dataset in test_dataset:
-                length_ls.extend(list(dataset.values())[0]["length"])
-        else:
-            length_ls = test_dataset["length"]
-        range_histogram(length_ls, 100, 50)
 
     if train_args.is_world_process_zero:
         logger.info(f"load_dataset_time: {time.time() - start_time:.2f}")
