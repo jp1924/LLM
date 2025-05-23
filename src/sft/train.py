@@ -8,16 +8,16 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 import datasets
+import optimization
 import torch
 from datasets import Dataset
-from setproctitle import setproctitle
-from trl import ModelConfig, SFTConfig, get_kbit_device_map, get_peft_config, get_quantization_config
-
-import optimization
-import transformers
 from metrics import METRICS_REGISTRY
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
+from setproctitle import setproctitle
 from trainer import PackingCollatorForLLM, PackingTrainer
+from trl import ModelConfig, SFTConfig, get_kbit_device_map, get_peft_config, get_quantization_config
+
+import transformers
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -234,7 +234,7 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
-        if self.dataset_kwargs.get("skip_prepare_dataset", False):
+        if self.dataset_kwargs:
             logger.warning(
                 "skip_prepare_dataset이 True임! 이 코드엔 데이터셋을 준비하는 코드가 있기 때문에 자동으로 False로 바꿈."
             )
