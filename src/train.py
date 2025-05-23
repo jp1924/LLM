@@ -7,13 +7,14 @@ from functools import partial
 from pathlib import Path
 from typing import List, Optional, Union
 
+import datasets
 import torch
 from datasets import Dataset
-from datasets import logging as ds_logging
 from setproctitle import setproctitle
-from trl import ModelConfig, SFTConfig
+from trl import ModelConfig, SFTConfig, get_kbit_device_map, get_peft_config, get_quantization_config
 
 import optimization
+import transformers
 from metrics import METRICS_REGISTRY
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
 from trainer import PackingCollatorForLLM, PackingTrainer
@@ -25,7 +26,6 @@ from transformers import (
     HfArgumentParser,
     set_seed,
 )
-from transformers import logging as hf_logging
 
 
 @dataclass
@@ -88,7 +88,7 @@ class DataScriptArguments:
 
 
 @dataclass
-class SFTTrainingArguments(DataScriptArguments, SFTConfig, ModelConfig):
+class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
     lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")
 
     chat_template: str = field(
@@ -207,9 +207,17 @@ class SFTTrainingArguments(DataScriptArguments, SFTConfig, ModelConfig):
             "attn_implementation": self.attn_implementation,
         }
 
-        self.tokenizer_kwargs = {
-            **self.tokenizer_kwargs,
-            "padding_side": self.padding_side,
+        quantization_config = get_quantization_config(self)
+        self.model_init_kwargs = {
+            **self.model_init_kwargs,
+            "revision": self.model_revision,
+            "use_cache": False if self.gradient_checkpointing else True,
+            "trust_remote_code": self.trust_remote_code,
+            "quantization_config": quantization_config,
+            "device_map": get_kbit_device_map() if quantization_config is not None else None,
+            "torch_dtype": (
+                self.torch_dtype if self.torch_dtype in ["auto", None] else getattr(torch, self.torch_dtype)
+            ),
         }
 
         if self.chat_template:
@@ -234,11 +242,11 @@ class SFTTrainingArguments(DataScriptArguments, SFTConfig, ModelConfig):
         return d
 
 
-hf_logging.set_verbosity_info()
-logger = hf_logging.get_logger("transformers")
+transformers.utils.logging.set_verbosity_info()
+logger = transformers.utils.logging.get_logger("transformers")
 
 
-def main(train_args: SFTTrainingArguments) -> None:
+def main(train_args: SFTScriptArguments) -> None:
     tokenizer = AutoTokenizer.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     config_kwargs = {
         **train_args.config_kwargs,
@@ -262,6 +270,8 @@ def main(train_args: SFTTrainingArguments) -> None:
     model_kwargs = {"config": config, **train_args.model_init_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
     model.train()
+
+    PackingTrainer.get_model_param_count(model)
 
     if train_args.torch_compile:
         model = torch.compile(
@@ -299,6 +309,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         args=train_args,
         compute_metrics=compute_metrics,
         callbacks=callbacks,
+        peft_config=get_peft_config(train_args),
     )
 
     if train_args.do_train and train_dataset:
@@ -311,7 +322,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         logger.info("do_predict 코드는 아직 작성 중")
 
 
-def train(trainer: PackingTrainer, args: SFTTrainingArguments) -> None:
+def train(trainer: PackingTrainer, args: SFTScriptArguments) -> None:
     outputs = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     trainer.log_metrics("train", outputs.metrics)
@@ -324,37 +335,8 @@ def valid(trainer: PackingTrainer, valid_datasets: Dataset) -> None:
     trainer.evaluate(valid_datasets)
 
 
-@torch.no_grad()
-def test(trainer: PackingTrainer, test_datasets: Dataset) -> None:
-    from transformers import GenerationConfig, TextGenerationPipeline
-    from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
-
-    pipeline = TextGenerationPipeline(
-        model=trainer.model.eval(),
-        tokenizer=trainer.processing_class,
-        device=trainer.model.device,
-        batch_size=trainer.args.per_device_eval_batch_size,
-    )
-    generate_kwargs = {
-        "generation_config": GenerationConfig(
-            max_new_tokens=1024,
-            use_cache=True,
-            do_sample=True,
-            repetition_penalty=1.2,
-            cache_implementation="hybrid",
-        ),
-        "synced_gpus": is_deepspeed_zero3_enabled(),
-    }
-    for data in test_datasets:
-        outputs_1 = pipeline(
-            trainer.processing_class.decode(data["input_ids"]),
-            return_full_text=True,
-            **generate_kwargs,
-        )
-
-
 if "__main__" in __name__:
-    parser = HfArgumentParser([SFTTrainingArguments])
+    parser = HfArgumentParser([SFTScriptArguments])
     train_args, remain_args = parser.parse_args_into_dataclasses(return_remaining_strings=True)
 
     if remain_args and train_args.distributed_state.is_local_main_process:
@@ -374,11 +356,9 @@ if "__main__" in __name__:
     log_level = train_args.get_process_log_level()
     logger.setLevel(log_level)
 
-    ds_logging.set_verbosity(log_level)
-    hf_logging.set_verbosity(log_level)
-    hf_logging.enable_default_handler()
-    hf_logging.enable_explicit_format()
-
-    torch.cuda.set_per_process_memory_fraction(0.3, train_args.local_process_index)
+    datasets.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.enable_default_handler()
+    transformers.utils.logging.enable_explicit_format()
 
     main(train_args)
