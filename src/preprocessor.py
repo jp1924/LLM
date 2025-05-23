@@ -31,9 +31,9 @@ def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args
         inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
 
         # verify special token
-        if np.isin(text, tokenizer.eos_token_id).any():
+        if not np.isin(text, tokenizer.eos_token_id).any():
             text = np.append(text, tokenizer.eos_token_id)
-        if np.isin(text, tokenizer.bos_token_id).any():
+        if tokenizer.bos_token_id and not np.isin(text, tokenizer.bos_token_id).any():
             text = np.insert(text, 0, tokenizer.bos_token_id)
             inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
@@ -70,9 +70,9 @@ def pretrain_processor(example, _, tokenizer: PreTrainedTokenizer, args: Trainin
         input_ids_ls, length_ls = outputs.input_ids, outputs.length
 
         for input_ids, length in zip(input_ids_ls, length_ls):
-            if np.isin(input_ids, tokenizer.eos_token_id).any():
+            if not np.isin(input_ids, tokenizer.eos_token_id).any():
                 input_ids = np.append(input_ids, tokenizer.eos_token_id)
-            if np.isin(input_ids, tokenizer.bos_token_id).any():
+            if not np.isin(input_ids, tokenizer.bos_token_id).any():
                 input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
 
             finish_data = {"input_ids": input_ids, args.length_column_name: length}
@@ -103,9 +103,9 @@ def tnt_dual_script(example, with_split: str, tokenizer: PreTrainedTokenizer, ar
         inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
 
         # verify special token
-        if np.isin(text, tokenizer.eos_token_id).any():
+        if not np.isin(text, tokenizer.eos_token_id).any():
             text = np.append(text, tokenizer.eos_token_id)
-        if np.isin(text, tokenizer.bos_token_id).any():
+        if tokenizer.bos_token_id and not np.isin(text, tokenizer.bos_token_id).any():
             text = np.insert(text, 0, tokenizer.bos_token_id)
             inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
@@ -145,9 +145,9 @@ def s2p_tnt_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, 
         inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
 
         # verify special token
-        if np.isin(text, tokenizer.eos_token_id).any():
+        if not np.isin(text, tokenizer.eos_token_id).any():
             text = np.append(text, tokenizer.eos_token_id)
-        if np.isin(text, tokenizer.bos_token_id).any():
+        if tokenizer.bos_token_id and not np.isin(text, tokenizer.bos_token_id).any():
             text = np.insert(text, 0, tokenizer.bos_token_id)
             inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
@@ -187,9 +187,9 @@ def p2s_tnt_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, 
         inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
 
         # verify special token
-        if np.isin(text, tokenizer.eos_token_id).any():
+        if not np.isin(text, tokenizer.eos_token_id).any():
             text = np.append(text, tokenizer.eos_token_id)
-        if np.isin(text, tokenizer.bos_token_id).any():
+        if tokenizer.bos_token_id and not np.isin(text, tokenizer.bos_token_id).any():
             text = np.insert(text, 0, tokenizer.bos_token_id)
             inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
@@ -246,6 +246,8 @@ PROCESSOR_REGISTRY = {
     "s2p_tnt": s2p_tnt_processor,
     "all_tnt": all_tnt_processor,
 }
+
+#############################################################################################################
 
 
 def range_histogram(data, num_bins=50, width=50):
