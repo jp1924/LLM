@@ -26,6 +26,7 @@ from transformers import (
     HfArgumentParser,
     set_seed,
 )
+from transformers.trainer_pt_utils import get_model_param_count
 
 
 @dataclass
@@ -271,7 +272,7 @@ def main(train_args: SFTScriptArguments) -> None:
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
     model.train()
 
-    PackingTrainer.get_model_param_count(model)
+    logger.info(f"Model parameter count: {get_model_param_count(model)}")
 
     if train_args.torch_compile:
         model = torch.compile(
