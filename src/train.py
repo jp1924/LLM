@@ -167,15 +167,13 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
             "data_truncate_map",
             "data_name_map",
             "config_kwargs",
-            "model_kwargs",
+            "model_init_kwargs",
             "tokenizer_kwargs",
-            "profiling_kwargs",
         ]
         _VALID_LIST_FIELDS = [
             "train_dataset_prefix",
             "valid_dataset_prefix",
             "test_dataset_prefix",
-            "freeze_named_param",
         ]
 
         # copied from: transformers/training_args.py/__post_init__()
@@ -203,22 +201,28 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
             else:
                 raise ValueError(f"{field}은 list로 설정해야 함. {passed_value}")
 
+        quantization_config = get_quantization_config(self)
         self.config_kwargs = {
             **self.config_kwargs,
             "attn_implementation": self.attn_implementation,
+            "use_cache": False if self.gradient_checkpointing else True,
         }
 
-        quantization_config = get_quantization_config(self)
         self.model_init_kwargs = {
-            **self.model_init_kwargs,
+            **(self.model_init_kwargs if self.model_init_kwargs else {}),
             "revision": self.model_revision,
-            "use_cache": False if self.gradient_checkpointing else True,
             "trust_remote_code": self.trust_remote_code,
             "quantization_config": quantization_config,
             "device_map": get_kbit_device_map() if quantization_config is not None else None,
             "torch_dtype": (
                 self.torch_dtype if self.torch_dtype in ["auto", None] else getattr(torch, self.torch_dtype)
             ),
+        }
+
+        self.tokenizer_kwargs = {
+            **(self.tokenizer_kwargs if self.tokenizer_kwargs else {}),
+            "revision": self.model_revision,
+            "trust_remote_code": self.trust_remote_code,
         }
 
         if self.chat_template:
@@ -229,6 +233,12 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
 
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
+
+        if self.dataset_kwargs.get("skip_prepare_dataset", False):
+            logger.warning(
+                "skip_prepare_dataset이 True임! 이 코드엔 데이터셋을 준비하는 코드가 있기 때문에 자동으로 False로 바꿈."
+            )
+            self.dataset_kwargs["skip_prepare_dataset"] = False
 
     def to_dict(self):
         """
