@@ -11,7 +11,7 @@ export OMP_NUM_THREADS=2
 export TORCHINDUCTOR_COMPILE_THREAD=2
 
 deepspeed --include=localhost:0,1,2,3 --master_port=9816 \
-    /root/workspace/src/train.py \
+    /root/workspace/src/sft/train.py \
     --output_dir='/root/output_dir/Qwen2.5-0.5B/s2p-tnt' \
     --cache_dir='/root/.cache/.[Qwen2.5-0.5B]preprocess/TNT_inst-s2p' \
     --run_name='Qwen/Qwen2.5-0.5B' \

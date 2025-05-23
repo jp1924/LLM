@@ -11,7 +11,7 @@ export OMP_NUM_THREADS=2
 export TORCHINDUCTOR_COMPILE_THREAD=2
 
 deepspeed --include=localhost:0,1,2,3 --master_port=7835 \
-    /root/workspace/src/train.py \
+    /root/workspace/src/sft/train.py \
     --output_dir='/root/output_dir/Qwen2.5-0.5B/dual-tnt' \
     --cache_dir='/root/.cache/.[Qwen2.5-0.5B]preprocess/TNT_inst-dual' \
     --run_name='Qwen/Qwen2.5-0.5B' \
@@ -44,7 +44,7 @@ deepspeed --include=localhost:0,1,2,3 --master_port=7835 \
     --save_steps=180 \
     --logging_strategy='steps' \
     --logging_steps=1 \
-    --data_max_length=512 \
+    --data_max_length=1000 \
     --bf16=true \
     --tf32=true \
     --report_to='wandb' \
