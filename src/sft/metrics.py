@@ -15,11 +15,11 @@ def compute_tnt_metrics(
 ) -> dict[str, float]:
     eval_pred.predictions[eval_pred.predictions == -100] = tokenizer.pad_token_id
     predictions = tokenizer.batch_decode(eval_pred.predictions, skip_special_tokens=False)
-    src = [x[0].replace(tokenizer.pad_token, "").split("<|im_start|>")[-1].split("<|im_end|>")[0] for x in predictions]
+    src = [x.replace(tokenizer.pad_token, "").split("<|im_start|>")[-1].split("<|im_end|>")[0] for x in predictions]
 
     eval_pred.label_ids[eval_pred.label_ids == -100] = tokenizer.pad_token_id
     label_ids = tokenizer.batch_decode(eval_pred.label_ids, skip_special_tokens=False)
-    lbl = [x[0].replace(tokenizer.pad_token, "") for x in label_ids]
+    lbl = [x.replace(tokenizer.pad_token, "") for x in label_ids]
 
     wer_score_ls, cer_score_ls, result_ls = [], [], []
     wer, cer = load("evaluate-metric/wer"), load("evaluate-metric/cer")

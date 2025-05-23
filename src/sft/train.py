@@ -15,7 +15,7 @@ from metrics import METRICS_REGISTRY
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
 from setproctitle import setproctitle
 from trainer import PackingCollatorForLLM, PackingTrainer
-from trl import ModelConfig, SFTConfig, get_kbit_device_map, get_peft_config, get_quantization_config
+from trl import ModelConfig, SFTConfig, TrlParser, get_kbit_device_map, get_peft_config, get_quantization_config
 
 import transformers
 from transformers import (
@@ -23,7 +23,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     GenerationConfig,
-    HfArgumentParser,
     set_seed,
 )
 from transformers.trainer_pt_utils import get_model_param_count
@@ -351,7 +350,7 @@ def valid(trainer: PackingTrainer, valid_datasets: Dataset) -> None:
 
 
 if "__main__" in __name__:
-    parser = HfArgumentParser([SFTScriptArguments])
+    parser = TrlParser([SFTScriptArguments])
     train_args, remain_args = parser.parse_args_into_dataclasses(return_remaining_strings=True)
 
     if remain_args and train_args.distributed_state.is_local_main_process:
