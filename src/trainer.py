@@ -283,6 +283,7 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
         else:
             return RandomSampler(self.train_dataset)
 
+    @torch.no_grad()
     def prediction_step(
         self,
         model: nn.Module,
