@@ -207,7 +207,7 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
             raise ValueError("Trainer: training requires a train_dataset.")
 
         # NOTE: packing을 사용할 경우 packing에 알맞은 getitems를 사용하도록 합니다.
-        if self.args.do_packing:
+        if self.args.packing:
             # 래핑된 함수를 정의하여 self를 전달할 수 있도록 합니다.
             def getitems_wrapper(keys):
                 return __packing_getitems__(train_dataset, keys)
@@ -241,7 +241,7 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
 
-        if self.args.group_by_length and self.args.do_packing:
+        if self.args.group_by_length and self.args.packing:
             raise ValueError("group_by_length and do_packing cannot be used together.")
 
         # Build the sampler.
@@ -263,7 +263,7 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
                 lengths=lengths,
                 model_input_name=model_input_name,
             )
-        elif self.args.do_packing:
+        elif self.args.packing:
             if is_datasets_available() and isinstance(self.train_dataset, Dataset):
                 lengths = (
                     self.train_dataset[self.args.length_column_name]
