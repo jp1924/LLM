@@ -7,30 +7,29 @@ from functools import partial
 from pathlib import Path
 from typing import List, Optional, Union
 
-import optimization
 import torch
-from accelerate import ProfileKwargs
 from datasets import Dataset
 from datasets import logging as ds_logging
+from setproctitle import setproctitle
+from trl import ModelConfig, SFTConfig
+
+import optimization
 from metrics import METRICS_REGISTRY
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
-from setproctitle import setproctitle
 from trainer import PackingCollatorForLLM, PackingTrainer
-from trl import SFTConfig
-
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
+    GenerationConfig,
     HfArgumentParser,
-    Seq2SeqTrainingArguments,
     set_seed,
 )
 from transformers import logging as hf_logging
 
 
 @dataclass
-class DataPipelineArguments:
+class DataScriptArguments:
     dataset_repo_ls: List[str] = field(
         default_factory=list,
         metadata={"help": "The list of dataset repository names to use (via the datasets library)."},
@@ -89,19 +88,9 @@ class DataPipelineArguments:
 
 
 @dataclass
-class TrainPipelineArguments:
-    model_name_or_path: str = field(
-        default=None,
-        metadata={"help": "The name or path of the pre-trained model."},
-    )
-    attn_implementation: str = field(
-        default="eager",
-        metadata={"help": "The attention implementation to use. Options: 'eager', 'flash_attention_2'."},
-    )
-    padding_side: str = field(
-        default="right",
-        metadata={"help": "The side on which to pad sequences. Options: 'left', 'right'."},
-    )
+class SFTTrainingArguments(DataScriptArguments, SFTConfig, ModelConfig):
+    lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")
+
     chat_template: str = field(
         default=None,
         metadata={"help": "The template for chat interactions."},
@@ -110,70 +99,45 @@ class TrainPipelineArguments:
         default=10,
         metadata={"help": "The maximum number of elements to pack together."},
     )
-    do_packing: bool = field(
-        default=False,
-        metadata={"help": "Whether to enable packing of sequences."},
-    )
-    packing_shuffle: bool = field(
-        default=True,
-        metadata={"help": "Whether to shuffle sequences during packing."},
-    )
-    profiling_kwargs: Optional[Union[dict, str]] = field(
-        default="{}",
-        metadata={"help": "profiling_kwargs"},
-    )
+
     config_kwargs: Optional[Union[dict, str]] = field(
         default="{}",
         metadata={"help": ""},
     )
-    model_kwargs: Optional[Union[dict, str]] = field(
-        default="{}",
-        metadata={"help": ""},
-    )
+
     tokenizer_kwargs: Optional[Union[dict, str]] = field(
         default="{}",
         metadata={"help": ""},
     )
-    freeze_named_param: List[str] = field(
+
+    sortish_sampler: bool = field(default=False, metadata={"help": "Whether to use SortishSampler or not."})
+    predict_with_generate: bool = field(
+        default=False, metadata={"help": "Whether to use generate to calculate generative metrics (ROUGE, BLEU)."}
+    )
+    generation_max_length: Optional[int] = field(
         default=None,
-        metadata={"help": "freeze_named_param"},
+        metadata={
+            "help": (
+                "The `max_length` to use on each evaluation loop when `predict_with_generate=True`. Will default "
+                "to the `max_length` value of the model configuration."
+            )
+        },
     )
-
-    profiling: bool = field(
-        default=False,
-        metadata={"help": "Whether to enable profiling during training."},
-    )
-    save_finally: bool = field(
-        default=False,
-        metadata={"help": "Whether to save the model finally."},
-    )
-
-
-@dataclass
-class EvalPipelineArguments:
-    do_logic_kor_at_save: bool = field(
-        default=False,
-        metadata={"help": "Whether to enable logic_kor evaluation at each save."},
-    )
-    judge_model: str = field(
+    generation_num_beams: Optional[int] = field(
         default=None,
-        metadata={"help": "The name or path of the judge model."},
+        metadata={
+            "help": (
+                "The `num_beams` to use on each evaluation loop when `predict_with_generate=True`. Will default "
+                "to the `num_beams` value of the model configuration."
+            )
+        },
     )
-    judge_repeat_num: int = field(
-        default=5,
-        metadata={"help": "The number of times to repeat the evaluation."},
+    generation_config: Optional[Union[str, Path, GenerationConfig]] = field(
+        default=None,
+        metadata={
+            "help": "Model id, file path or url pointing to a GenerationConfig json file, to use during prediction."
+        },
     )
-    tasks: str = field(
-        default="haerae",
-        metadata={"help": "The tasks to evaluate on."},
-    )
-
-
-@dataclass
-class SFTTrainingArguments(
-    DataPipelineArguments, TrainPipelineArguments, EvalPipelineArguments, Seq2SeqTrainingArguments, SFTConfig
-):
-    lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")
 
     def __post_init__(self):
         if self.output_dir is None:
@@ -257,6 +221,18 @@ class SFTTrainingArguments(
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
+    def to_dict(self):
+        """
+        Serializes this instance while replace `Enum` by their values and `GenerationConfig` by dictionaries (for JSON
+        serialization support). It obfuscates the token values by removing their value.
+        """
+        # filter out fields that are defined as field(init=False)
+        d = super().to_dict()
+        for k, v in d.items():
+            if isinstance(v, GenerationConfig):
+                d[k] = v.to_dict()
+        return d
+
 
 hf_logging.set_verbosity_info()
 logger = hf_logging.get_logger("transformers")
@@ -283,7 +259,7 @@ def main(train_args: SFTTrainingArguments) -> None:
             PROCESSOR_REGISTRY[train_args.data_preprocessor_type],
         )
 
-    model_kwargs = {"config": config, **train_args.model_kwargs}
+    model_kwargs = {"config": config, **train_args.model_init_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
     model.train()
 
@@ -336,26 +312,7 @@ def main(train_args: SFTTrainingArguments) -> None:
 
 
 def train(trainer: PackingTrainer, args: SFTTrainingArguments) -> None:
-    from transformers.trainer_utils import TrainOutput
-
-    context = trainer.accelerator.profile(ProfileKwargs(**args.profiling_kwargs)) if args.profiling else nullcontext()
-
-    with context as prof:
-        try:
-            outputs: TrainOutput = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
-        finally:
-            if args.save_finally:
-                try:
-                    trainer._save_checkpoint(trainer.model, None)
-                except BaseException:
-                    pass
-
-    save_path = Path(args.output_dir)
-    if prof:
-        prof.export_memory_timeline(save_path.with_suffix(".memory_trace.json").as_posix())
-        prof.export_chrome_trace(save_path.with_suffix(".chrome_trace.json").as_posix())
-        print(prof.key_averages().table(sort_by="flops", row_limit=10))
-        print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
+    outputs = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     trainer.log_metrics("train", outputs.metrics)
     trainer.save_metrics("train", outputs.metrics)
