@@ -7,17 +7,17 @@ from functools import partial
 from pathlib import Path
 from typing import List, Optional, Union
 
+import optimization
 import torch
 from accelerate import ProfileKwargs
 from datasets import Dataset
 from datasets import logging as ds_logging
-from setproctitle import setproctitle
-from trl import SFTConfig
-
-import optimization
 from metrics import METRICS_REGISTRY
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
+from setproctitle import setproctitle
 from trainer import PackingCollatorForLLM, PackingTrainer
+from trl import SFTConfig
+
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -27,8 +27,6 @@ from transformers import (
     set_seed,
 )
 from transformers import logging as hf_logging
-from transformers.trainer_pt_utils import get_model_param_count
-from transformers.utils import is_sagemaker_mp_enabled
 
 
 @dataclass
@@ -297,13 +295,17 @@ def main(train_args: SFTTrainingArguments) -> None:
             fullgraph=True,
         )
 
-    compute_metrics = None
+    compute_metrics, callbacks = None, None
     if train_args.data_preprocessor_type in METRICS_REGISTRY:
+        from callbacks import OnlyPicklingCallback
+
         compute_metrics = partial(
             METRICS_REGISTRY[train_args.data_preprocessor_type],
             tokenizer=tokenizer,
             args=train_args,
         )
+
+        callbacks = [OnlyPicklingCallback()]
 
     collator = PackingCollatorForLLM(
         model=model,
@@ -320,6 +322,7 @@ def main(train_args: SFTTrainingArguments) -> None:
         data_collator=collator,
         args=train_args,
         compute_metrics=compute_metrics,
+        callbacks=callbacks,
     )
 
     if train_args.do_train and train_dataset:

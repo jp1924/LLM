@@ -1,5 +1,6 @@
 import json
 import os
+import pickle
 import re
 from pathlib import Path
 from time import sleep
@@ -1242,7 +1243,7 @@ class LMEvalHarnessCallback(TrainerCallback):
     def __init__(self, args: TrainingArguments):
         self.tasknames = self.get_task_ls(args)
 
-    def get_task_ls(args: TrainingArguments) -> List[str]:
+    def get_task_ls(self, args: TrainingArguments) -> List[str]:
         from lm_eval import utils
         from lm_eval.tasks import TaskManager
 
@@ -1300,3 +1301,17 @@ class LMEvalHarnessCallback(TrainerCallback):
             apply_chat_template=args.apply_chat_template,
         )
         return super().on_save(args, state, control, **kwargs)
+
+
+class OnlyPicklingCallback(TrainerCallback):
+    def on_evaluate(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        model: PreTrainedModel,
+        processing_class: PreTrainedTokenizer,
+        **kwargs,
+    ):
+        for idx, log in enumerate(state.log_history):
+            state.log_history[idx] = {key: obj for key, obj in log.items() if type(obj).__module__ == "builtins"}
