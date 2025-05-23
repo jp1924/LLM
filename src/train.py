@@ -343,7 +343,11 @@ def train(trainer: PackingTrainer, args: SFTScriptArguments) -> None:
 @torch.no_grad()
 def valid(trainer: PackingTrainer, valid_datasets: Dataset) -> None:
     valid_datasets = valid_datasets if valid_datasets else trainer.eval_dataset
-    trainer.evaluate(valid_datasets)
+    metrics = trainer.evaluate(valid_datasets)
+    metrics = {key: obj for key, obj in metrics.items() if type(obj).__module__ == "builtins"}
+
+    trainer.log_metrics("valid", metrics)
+    trainer.save_metrics("valid", metrics)
 
 
 if "__main__" in __name__:
