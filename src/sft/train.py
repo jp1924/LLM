@@ -314,7 +314,7 @@ def main(train_args: SFTScriptArguments) -> None:
     trainer = PackingTrainer(
         model=model,
         train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
+        eval_dataset=valid_dataset if train_args.eval_strategy != "no" else None,
         processing_class=tokenizer,
         data_collator=collator,
         args=train_args,
