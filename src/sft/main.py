@@ -252,7 +252,6 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
         return d
 
 
-transformers.utils.logging.set_verbosity_info()
 logger = transformers.utils.logging.get_logger("transformers")
 
 
