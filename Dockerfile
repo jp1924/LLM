@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
+FROM nvcr.io/nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04
 
 WORKDIR /root
 USER root
@@ -19,8 +19,9 @@ RUN sh /uv-installer.sh && rm /uv-installer.sh
 ENV PATH="/root/.local/bin/:$PATH"
 
 RUN uv pip install --system -U pip wheel setuptools
-RUN uv pip install --system torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
-RUN uv pip install --system flash-attn==2.7.4.post1 --no-build-isolation
-RUN uv pip install --system transformers==4.51.0 accelerate datasets evaluate trl peft deepspeed liger-kernel lomo-optim \
-    bitsandbytes scipy sentencepiece pillow \
+RUN uv pip install --system torch==2.7.1+cu126 torchvision==0.22.1+cu126 torchaudio==2.7.1+cu126 --index-url https://download.pytorch.org/whl/cu126
+RUN uv pip install --system transformers accelerate datasets evaluate trl peft deepspeed liger-kernel lomo-optim apollo-torch transformer_engine[pytorch]\
+    bitsandbytes scipy sentencepiece pillow fastapi uvicorn unsloth==2025.7.3 unsloth-zoo==2025.7.4 xformers==0.0.29.post2 opensloth==0.1.8 \
     ruff natsort setproctitle glances[gpu] wandb cmake
+
+RUN uv pip install --system flash-attn --no-build-isolation
