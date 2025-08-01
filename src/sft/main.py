@@ -303,9 +303,9 @@ def main(train_args: SFTScriptArguments) -> None:
         callbacks = [OnlyPicklingCallback()]
 
     collator = PackingCollatorForLLM(
-        model=model,
-        tokenizer=tokenizer,
         args=train_args,
+        model=model,
+        processor=tokenizer,
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 

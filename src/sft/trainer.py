@@ -403,91 +403,98 @@ class PackingCollatorForLLM(DataCollatorMixin):
     def __init__(
         self,
         args: TrainingArguments,
-        model,
-        tokenizer,
-        sample_dataset: Optional[Dataset] = None,
+        model: nn.Module,
+        processor: Union[ProcessorMixin, PreTrainedTokenizer],
         return_tensors: Optional[str] = "pt",
+        sample_dataset: Optional[Dataset] = None,
     ) -> None:
+        """
+        Args:
+            args (`TrainingArguments`):
+                현재 학습 상태 및 설정을 확인하기 위한 값
+            model (`nn.Module`):
+                현재 학습 중인지 아닌지 확인하기 위한 값
+            processor (`ProcessorMixin` or `PreTrainedTokenizer`):
+                입력받은 데이터를 pad처리 하거나, 추가적인 전처리를 진행하기 위해 사용하는 프로세서
+            return_tensors (`str`, *optional*, defaults to `"pt"`):
+                입력받은 값은 pt, tf, np 중 하나로 변환. 기본값은 "pt"입니다.
+            sample_dataset (`Dataset`, *optional*):
+                전처리가 끝난 샘플 데이터셋. 이 데이터셋을 통해 입력값이 올바르게 처리되는지 확인.
+                만약 제공되지 않는다면, 입력값이 올바르게 처리되는지 확인하는 과정은 생략.
+                주호 학습 전에 Collator가 정상 동작 하는지와, BOS, EOS 토큰이 올바르게 학습 데이터에 포함되어 있는지 확인하는 용도로 사용된다.
+        """
         self.args = args
         self.model = model
         self.return_tensors = return_tensors
-        self.tokenizer = tokenizer
+        self.processor = processor
 
-        sample_check = self([sample_dataset[0]])
-        input_ids = sample_check["input_ids"].tolist()[0]
-        if self.args.distributed_state.is_local_main_process:
-            sample_check["labels"] = sample_check["labels"][sample_check["labels"] != -100].tolist()
-            check_labels = [self.tokenizer.convert_ids_to_tokens(token) for token in sample_check["labels"]]
-            check_labels = ", ".join(check_labels)
-            logger.info(f"collator_label: [-100,  ..., -100, {check_labels}]")
+        if sample_dataset is not None and self.args.distributed_state.is_local_main_process:
+            sample = sample_dataset[0]
+            sample_check = self([sample])
 
-        if self.tokenizer.bos_token_id and self.tokenizer.bos_token_id not in input_ids:
-            raise ValueError("BOS token이 없다. 이거 다시 전처리 해라.")
+            input_ids, labels = sample_check["input_ids"].tolist()[0], sample_check["labels"]
+            labels = labels[labels != -100].tolist()
 
-        if self.tokenizer.eos_token_id not in input_ids:
-            raise ValueError("EOS token이 없다. 이거 다시 전처리 해라.")
+            str_labels = [self.processor.convert_ids_to_tokens(token) for token in labels]
+            str_input_ids = [self.processor.convert_ids_to_tokens(token) for token in input_ids]
 
-    def _create_attention_mask(self, input_length_ls: List[int]) -> torch.Tensor:
-        total_length = sum(input_length_ls)
-        attention_mask = torch.full((1, 1, total_length, total_length), torch.finfo(self.dtype).min)
+            logger.info(f"\nlabel-values: [{', '.join(str_labels)}]\ninput-values: [{', '.join(str_input_ids)}]\n")
 
-        start_idx, end_idx = 0, 0
-        for length in input_length_ls:
-            end_idx += length
-            one_tensor = torch.ones((length, length), dtype=torch.float32)
-            mask = torch.tril(one_tensor, diagonal=0).to(dtype=torch.bool)
-            attention_mask[0, 0, start_idx:end_idx, start_idx:end_idx][mask] = 0
-            start_idx = end_idx
+            if self.processor.bos_token_id and self.processor.bos_token_id not in input_ids:
+                raise ValueError("BOS 토큰이 데이터에서 검출되지 않는다. 전처리가 다시 필요하다.")
+            if self.processor.eos_token_id not in input_ids:
+                raise ValueError("EOS 토큰이 데이터에서 검출되지 않는다. 전처리가 다시 필요하다.")
 
-        return attention_mask
+            if self.model.config._attn_implementation == "eager" and self.args.spfhp_packing:
+                msg = "attention implementation이 eager인데, packing을 사용하고 있다. flash attention으로 변경해라."
+                raise ValueError(msg)
 
-    def torch_call(
-        self,
-        features_ls: List[dict],
-    ) -> dict:
-        input_ids_ls, labels_ls, position_ids_ls, input_length_ls = list(), list(), list(), list()
-        for packing_ls in features_ls:
-            packing_ls = [packing_ls] if isinstance(packing_ls, dict) else packing_ls
-            for features in packing_ls:
-                if self.model.training:
-                    length = len(features["input_ids"])
+    def _pack_collate(self, features_ls: List[List[dict]]) -> dict:
+        if features_ls and isinstance(features_ls[0], dict):
+            features_ls = [features_ls]
 
-                    # input_ids_ls.append({"input_ids": features["input_ids"]})
-                    # labels_ls.append({"input_ids": features["labels"]})
-                    input_ids_ls.append(features["input_ids"])
-                    labels_ls.append(features["labels"])
-                    position_ids_ls.append(torch.arange(length))
-                    input_length_ls.append(length)
-                else:
-                    input_ids_ls.append({"input_ids": features["input_ids"]})
-                    labels_ls.append({"input_ids": features["labels"]})
+        input_ids_ls, labels_ls, position_ids_ls, input_length_ls = [], [], [], []
+        for features in features_ls:
+            for feature in features:
+                length = len(feature["input_ids"])
+                input_ids_ls.append(feature["input_ids"])
+                labels_ls.append(feature["labels"])
+                position_ids_ls.append(torch.arange(length))
+                input_length_ls.append(length)
 
-        batch = dict()
-        if input_ids_ls and self.model.training:
-            # output = self.tokenizer.pad(input_ids_ls, padding_side="left", return_tensors="pt")
-            # batch["input_ids"] = output.input_ids
-            # batch["attention_mask"] = output.attention_mask
-            batch["input_ids"] = torch.concat(input_ids_ls)[None]
-        else:
-            output = self.tokenizer.pad(input_ids_ls, padding_side="left", return_tensors="pt")
-            batch["input_ids"] = output.input_ids
-            batch["attention_mask"] = output.attention_mask
-
-        if labels_ls and self.model.training:
-            # output = self.tokenizer.pad(labels_ls, padding_side="left", return_tensors="pt")
-            # for idx, (input_ids, attention_mask) in enumerate(zip(output.input_ids, output.attention_mask)):
-            #     input_ids[attention_mask == 0] = -100
-            #     output.input_ids[idx] = input_ids
-            # batch["labels"] = output.input_ids
-            batch["labels"] = torch.concat(labels_ls)[None]
-        else:
-            output = self.tokenizer.pad(labels_ls, padding_side="left", return_tensors="pt")
-            batch["labels"] = output.input_ids
-
-        if position_ids_ls and self.model.training:
-            batch["position_ids"] = torch.concat(position_ids_ls)[None]
-
-        if self.args.attn_implementation == "eager" and self.model.training:
-            batch["attention_mask"] = self._create_attention_mask(input_length_ls)
+        batch = {
+            "input_ids": torch.cat(input_ids_ls)[None],
+            "labels": torch.cat(labels_ls)[None],
+            "position_ids": torch.cat(position_ids_ls)[None],
+        }
 
         return batch
+
+    def _pad_collate(self, features_ls: Union[List[dict], List[List[Dict]]]) -> dict:
+        def flatten(features_ls):
+            return [
+                feature
+                for features in features_ls
+                for feature in (features if isinstance(features, list) else [features])
+            ]
+
+        feature_ls = flatten(features_ls)
+        input_ids_features = [{"input_ids": feature["input_ids"]} for feature in feature_ls]
+        labels_features = [{"input_ids": feature["labels"]} for feature in feature_ls]
+
+        input_output = self.processor.pad(input_ids_features, padding_side="left", return_tensors="pt")
+        labels_output = self.processor.pad(labels_features, padding_side="left", return_tensors="pt")
+
+        batch = {
+            "input_ids": input_output.input_ids,
+            "labels": labels_output.input_ids,
+            "attention_mask": input_output.attention_mask,
+        }
+        return batch
+
+    def torch_call(self, features_ls: Union[List[dict], List[List[dict]]]) -> dict:
+        use_packing = getattr(self.args, "spfhp_packing", False)
+        if use_packing and self.model.training:
+            return self._pack_collate(features_ls)
+        else:
+            return self._pad_collate(features_ls)
