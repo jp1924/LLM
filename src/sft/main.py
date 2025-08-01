@@ -32,58 +32,76 @@ from transformers.trainer_pt_utils import get_model_param_count
 class DataScriptArguments:
     dataset_repo_ls: List[str] = field(
         default_factory=list,
-        metadata={"help": "The list of dataset repository names to use (via the datasets library)."},
+        metadata={
+            "help": "학습에 사용할 데이터셋의 hub_repo 이름을 리스트로 입력한다. 예: ['hf_repo1', 'hf_repo2']. datasets 4.0.0 이라면 remote_code는 동작하지 않기 때문에 이 점을 알고 사용해야 한다."
+        },
     )
     data_preprocessor_type: str = field(
         default_factory=lambda: PROCESSOR_REGISTRY.keys(),
-        metadata={"help": "preprocessor type"},
+        metadata={
+            "help": f"학습할 데이터의 전처리를 어떻게 할지 결정하는 값, {', '.join(PROCESSOR_REGISTRY.keys())} 를 지원한다."
+        },
     )
     data_max_length: int = field(
         default=2048,
-        metadata={"help": "The maximum length of the data sequences."},
+        metadata={
+            "help": "학습에 활용될 데이터의 최대 길이를 설정하는 값. tokenizing이 수행된 후의 length 길이로 동작한다."
+        },
     )
 
     preprocessing_num_workers: int = field(
         default=5,
-        metadata={"help": "The number of worker processes to use for data preprocessing."},
+        metadata={"help": "데이터 전처리에 활용할 프로세스의 수, 1 이면 싱글 프로세스로 동작한다."},
     )
     preprocessing_batch_size: int = field(
         default=1000,
-        metadata={"help": "The batch size to use for data preprocessing."},
+        metadata={"help": "데이터 전처리 시 사용할 배치 크기를 설정하는 값."},
     )
     preprocessing_batched: bool = field(
         default=True,
-        metadata={"help": "Whether to batch the data during preprocessing."},
+        metadata={
+            "help": "데이터 전처리 시 배치를 사용할지 여부를 결정하는 값. True로 설정하면 데이터 전처리가 배치 단위로 처리된다."
+        },
     )
     train_dataset_prefix: List[str] = field(
         default_factory=list,
-        metadata={"help": "A prefix required to distinguish training splits in the data loaded by load_dataset."},
+        metadata={
+            "help": "데이터셋 로드 시 학습 데이터를 구분하기 위해 사용되는 접두어 리스트. load_dataset 함수에서 학습 데이터 필터링에 활용된다."
+        },
     )
     valid_dataset_prefix: List[str] = field(
         default_factory=list,
-        metadata={"help": "A prefix required to distinguish validation splits in the data loaded by load_dataset."},
+        metadata={
+            "help": "데이터셋 로드 시 검증 데이터를 구분하기 위해 사용되는 접두어 리스트. load_dataset 함수에서 검증 데이터 필터링에 활용된다."
+        },
     )
     test_dataset_prefix: List[str] = field(
         default_factory=list,
-        metadata={"help": "A prefix required to distinguish test splits in the data loaded by load_dataset."},
+        metadata={
+            "help": "데이터셋 로드 시 테스트 데이터를 구분하기 위해 사용되는 접두어 리스트. processing_datasets 함수에서 테스트 데이터 필터링에 활용된다."
+        },
     )
     data_truncate_map: Optional[Union[dict, str]] = field(
         default="{}",
         metadata={
-            "help": "A map to truncate part of the data. Example: {'repo_name': {'train': 3000, 'validation': 1500}}."
+            "help": "데이터의 샘플 개수를 조절하기 위한 맵. 예: {'repo_name': {'train': 3000, 'validation': 1500}}. 데이터셋 처리 시 활용된다."
         },
     )
     data_name_map: Optional[Union[dict, str]] = field(
         default="{}",
-        metadata={"help": "A map to config_name of the data. Example: {'repo_name': 'data_config_name'}."},
+        metadata={
+            "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'data_config_name'}. 데이터셋 로드 시 사용된다."
+        },
     )
     do_data_main_process_first: bool = field(
         default=False,
-        metadata={"help": "Whether to run data preprocessing on the main process first."},
+        metadata={
+            "help": "데이터 전처리를 메인 프로세스에서 먼저 실행할지 여부를 결정하는 값. main_process_first 컨텍스트에서 사용된다."
+        },
     )
     cache_dir: Optional[str] = field(
         default=None,
-        metadata={"help": "The directory to store the cache files."},
+        metadata={"help": "캐시 파일을 저장할 디렉토리를 설정하는 값. 데이터셋 로드 및 모델 저장 시 사용된다."},
     )
 
 
