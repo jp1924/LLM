@@ -99,6 +99,11 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
         default=10,
         metadata={"help": "The maximum number of elements to pack together."},
     )
+    # NOTE: SFTConfig에서 지원하는 packing args와 충돌을 피하기 위해 spfhp라는 값을 별도로 지정
+    spfhp_packing: bool = field(
+        default=False,
+        metadata={"help": "The maximum number of elements to pack together."},
+    )
 
     config_kwargs: Optional[Union[dict, str]] = field(
         default="{}",

@@ -8,16 +8,21 @@ import torch
 from datasets import Dataset
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel
-from torch.utils.data import DataLoader, RandomSampler, Sampler
+from torch.utils.data import RandomSampler, Sampler
 from trl import SFTTrainer
 
-from transformers import Seq2SeqTrainer, TrainingArguments
+from transformers import (
+    PreTrainedTokenizer,
+    ProcessorMixin,
+    Seq2SeqTrainer,
+    TrainingArguments,
+)
 from transformers import logging as hf_logging
 from transformers.data.data_collator import DataCollatorMixin
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
 from transformers.trainer_pt_utils import LengthGroupedSampler
-from transformers.trainer_utils import has_length, seed_worker
+from transformers.trainer_utils import has_length
 from transformers.utils import is_datasets_available
 
 
@@ -25,7 +30,7 @@ hf_logging.set_verbosity_info()
 logger = hf_logging.get_logger("transformers")
 
 
-class PackingSampler(Sampler):
+class SPFHPPackingSampler(Sampler):
     def __init__(
         self,
         dataset: Dataset,
@@ -159,7 +164,11 @@ class PackingSampler(Sampler):
             lengths=self.lengths,
         )
 
-        return iter(packing_sample_ls)
+        for packing_sample in packing_sample_ls:
+            # print(f"Packing sample: {packing_sample}")
+            yield packing_sample
+
+        # return iter(packing_sample_ls)
 
     def __len__(self):
         return len(self.packing_sample_ls)
@@ -171,6 +180,8 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
         args,
         **kwargs,
     ) -> None:
+        # NOTE: Validation 중 model.generate를 통해 sequence를 생성할 수 있도록 만든 Trainer
+        #       TNT모델 학습시킬 때나 활용하지 굳이 LLM 학습시킬 때 활용할만한 것은 아니다.
         setattr(args, "dataset_kwargs", {"skip_prepare_dataset": True})
         setattr(args, "padding_free", False)
         SFTTrainer.__init__(
@@ -178,20 +189,11 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
             args=args,
             **kwargs,
         )
-        if self.args.generation_config is not None:
-            gen_config = self.load_generation_config(self.args.generation_config)
-            self.model.generation_config = gen_config
 
-    def get_train_dataloader(self) -> DataLoader:
-        """
-        Returns the training [`~torch.utils.data.DataLoader`].
-
-        Will use no sampler if `train_dataset` does not implement `__len__`, a random sampler (adapted to distributed
-        training if necessary) otherwise.
-
-        Subclass and override this method if you want to inject some custom behavior.
-        """
-
+        # NOTE: normal-case: [idx_1, idx_2, idx_3, idx_4, idx_5, idx_6, ...]
+        #       packing-case: [[idx_1, idx_2, idx_3], [idx_4, idx_5, idx_6], ...]
+        #       packing sampler를 사용하는 경우 packing-case와 같이 이중 리스트로 건내지기 때문에 dataset.__getitem__이
+        #       이중 리스트를 처리할 수 있도록 __getitems__ 메소드를 정의 했다.
         def __packing_getitems__(train_dataset, keys: List[List[int]]) -> List:
             """Can be used to get a batch using a list of integers indices."""
 
@@ -203,45 +205,24 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
                 return_ls.append([{col: array[i] for col, array in batch.items()} for i in range(n_examples)])
             return return_ls
 
-        if self.train_dataset is None:
-            raise ValueError("Trainer: training requires a train_dataset.")
-
         # NOTE: packing을 사용할 경우 packing에 알맞은 getitems를 사용하도록 합니다.
-        if self.args.packing:
+        if self.args.spfhp_packing and self.train_dataset:
             # 래핑된 함수를 정의하여 self를 전달할 수 있도록 합니다.
             def getitems_wrapper(keys):
-                return __packing_getitems__(train_dataset, keys)
+                return __packing_getitems__(self.train_dataset, keys)
 
             setattr(self.train_dataset, "__getitems__", getitems_wrapper)
+        if self.args.generation_config is not None:
+            gen_config = self.load_generation_config(self.args.generation_config)
+            self.model.generation_config = gen_config
 
-        train_dataset = self.train_dataset
-        data_collator = self.data_collator
-        if is_datasets_available() and isinstance(train_dataset, Dataset):
-            train_dataset = self._remove_unused_columns(train_dataset, description="training")
-        else:
-            data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
-
-        dataloader_params = {
-            "batch_size": self._train_batch_size,
-            "collate_fn": data_collator,
-            "num_workers": self.args.dataloader_num_workers,
-            "pin_memory": self.args.dataloader_pin_memory,
-            "persistent_workers": self.args.dataloader_persistent_workers,
-        }
-
-        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
-            dataloader_params["sampler"] = self._get_train_sampler()
-            dataloader_params["drop_last"] = self.args.dataloader_drop_last
-            dataloader_params["worker_init_fn"] = seed_worker
-            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
-
-        return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
-
-    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
-        if self.train_dataset is None or not has_length(self.train_dataset):
+    def _get_train_sampler(self, train_dataset: Optional[Dataset] = None) -> Optional[torch.utils.data.Sampler]:
+        if train_dataset is None:
+            train_dataset = self.train_dataset
+        if train_dataset is None or not has_length(train_dataset):
             return None
 
-        if self.args.group_by_length and self.args.packing:
+        if self.args.group_by_length and self.args.spfhp_packing:
             raise ValueError("group_by_length and do_packing cannot be used together.")
 
         # Build the sampler.
@@ -263,7 +244,7 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
                 lengths=lengths,
                 model_input_name=model_input_name,
             )
-        elif self.args.packing:
+        elif self.args.spfhp_packing:
             if is_datasets_available() and isinstance(self.train_dataset, Dataset):
                 lengths = (
                     self.train_dataset[self.args.length_column_name]
@@ -273,7 +254,11 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
             else:
                 lengths = None
 
-            return PackingSampler(
+            logger.info(
+                f"Using SPFHPPackingSampler with max_seq_len={self.args.data_max_length} and "
+                f"max_seq_per_pack={self.args.packing_max_elem}."
+            )
+            return SPFHPPackingSampler(
                 dataset=self.train_dataset,
                 lengths=lengths,
                 max_seq_len=self.args.data_max_length,
