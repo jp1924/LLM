@@ -256,13 +256,13 @@ class PackingTrainer(Seq2SeqTrainer, SFTTrainer):
 
             logger.info(
                 f"Using SPFHPPackingSampler with max_seq_len={self.args.data_max_length} and "
-                f"max_seq_per_pack={self.args.packing_max_elem}."
+                f"max_seq_per_pack={self.args.spfhp_packing_max_elem}."
             )
             return SPFHPPackingSampler(
                 dataset=self.train_dataset,
                 lengths=lengths,
                 max_seq_len=self.args.data_max_length,
-                max_seq_per_pack=self.args.packing_max_elem,
+                max_seq_per_pack=self.args.spfhp_packing_max_elem,
             )
 
         else:

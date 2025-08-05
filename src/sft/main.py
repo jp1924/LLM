@@ -113,7 +113,7 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
         default=None,
         metadata={"help": "The template for chat interactions."},
     )
-    packing_max_elem: int = field(
+    spfhp_packing_max_elem: int = field(
         default=10,
         metadata={"help": "The maximum number of elements to pack together."},
     )
