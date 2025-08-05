@@ -1,4 +1,3 @@
-import json
 import logging
 import sys
 from contextlib import nullcontext
@@ -101,7 +100,6 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
         "data_truncate_map",
         "data_name_map",
         "config_kwargs",
-        "model_init_kwargs",
         "tokenizer_kwargs",
         "dataset_prefix",
     ]
@@ -123,7 +121,7 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
     )
 
     config_kwargs: Optional[Union[dict, str]] = field(
-        default="{}",
+        default_factory=dict,
         metadata={"help": ""},
     )
 
@@ -178,6 +176,7 @@ logger = transformers.utils.logging.get_logger("transformers")
 
 
 def main(train_args: SFTScriptArguments) -> None:
+    # NOTE: dataset 전처리를 위한 값들을 우선 로딩
     tokenizer = AutoTokenizer.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     config_kwargs = {
         **train_args.config_kwargs,
@@ -198,6 +197,7 @@ def main(train_args: SFTScriptArguments) -> None:
             PROCESSOR_REGISTRY[train_args.data_preprocessor_type],
         )
 
+    # NOTE: 학습에 활용할 값들을 로딩
     model_kwargs = {"config": config, **train_args.model_init_kwargs}
     model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
     model.use_cache = False if train_args.gradient_checkpointing else True
