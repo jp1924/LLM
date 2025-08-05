@@ -1,0 +1,51 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+# num_cpu_threads_per_process: 4
+# dynamo_mode: max-autotune
+# dynamo_config:
+#   dynamo_backend: INDUCTOR
+#   dynamo_mode: max-autotune
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+# Similar to FSDP, we set the distributed type as DEEPSPEED
+distributed_type: DEEPSPEED
+deepspeed_config:
+  # FP8 사용을 위해 deepspeed_config_file 대신 직접 설정
+  zero_optimization:
+    stage: 3
+    allgather_partitions: true
+    reduce_bucket_size: "auto"
+    stage3_prefetch_bucket_size: "auto"
+    stage3_param_persistence_threshold: "auto"
+    stage3_max_live_parameters: 1000000000000
+    stage3_max_reuse_distance: 1000000000000
+    allgather_bucket_size: 1000000000000
+    overlap_comm: false
+    reduce_scatter: true
+    contiguous_gradients: true
+    stage3_gather_16bit_weights_on_model_save: true
+  zero_allow_untested_optimizer: true
+  train_batch_size: "auto"
+  train_micro_batch_size_per_gpu: "auto"
+  wall_clock_breakdown: false
+  activation_checkpointing:
+    partition_activations: false
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    number_checkpoints: 10
+    synchronize_checkpoint_boundary: false
+    profile: false
+  # ZeRO-3 초기화 플래그
+  zero3_init_flag: true
+  # 16비트 모델 저장 설정
+  zero3_save_16bit_model: true 
+
+# Finally we need to specify the number of GPUs to use
+num_processes: 4
+# FP8 mixed precision 설정
+mixed_precision: bf16
+# mixed_precision: fp8
+# fp8_config:
+#   backend: TE # Can be TE | MS-AMP
+#   fp8_format: HYBRID
+#   interval: 1

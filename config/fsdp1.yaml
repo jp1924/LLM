@@ -1,0 +1,13 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+main_training_function: main
+num_machines: 1
+num_processes: 4
+same_network: false
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+mixed_precision: bf16
+distributed_type: FSDP
