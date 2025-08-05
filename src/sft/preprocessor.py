@@ -38,7 +38,7 @@ def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args
             inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
         finish_data = {}
-        if with_split in args.train_dataset_prefix:
+        if with_split in setattr(args.dataset_prefix, "train", []):
             labels = text.copy()
             labels[: len(inst)] = -100
 
@@ -46,7 +46,7 @@ def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args
             finish_data["labels"] = labels
             finish_data[args.length_column_name] = len(text)
 
-        elif with_split in args.valid_dataset_prefix + args.test_dataset_prefix:
+        elif with_split in getattr(args.dataset_prefix, "valid", []) + getattr(args.dataset_prefix, "test", []):
             finish_data["input_ids"] = inst
             finish_data["labels"] = labels
             finish_data[args.length_column_name] = len(inst)
@@ -110,11 +110,11 @@ def tnt_dual_script(example, with_split: str, tokenizer: PreTrainedTokenizer, ar
             inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
         finish_data = {}
-        if with_split in args.train_dataset_prefix:
+        if with_split in setattr(args.dataset_prefix, "train", []):
             finish_data["input_ids"] = text
             finish_data["labels"] = text.copy()
             finish_data[args.length_column_name] = len(text)
-        elif with_split in args.valid_dataset_prefix + args.test_dataset_prefix:
+        elif with_split in getattr(args.dataset_prefix, "valid", []) + getattr(args.dataset_prefix, "test", []):
             finish_data["input_ids"] = inst
             finish_data["labels"] = labels
             finish_data[args.length_column_name] = len(inst)
@@ -152,11 +152,11 @@ def s2p_tnt_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, 
             inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
         finish_data = {}
-        if with_split in args.train_dataset_prefix:
+        if with_split in setattr(args.dataset_prefix, "train", []):
             finish_data["input_ids"] = text
             finish_data["labels"] = text.copy()
             finish_data[args.length_column_name] = len(text)
-        elif with_split in args.valid_dataset_prefix + args.test_dataset_prefix:
+        elif with_split in getattr(args.dataset_prefix, "valid", []) + getattr(args.dataset_prefix, "test", []):
             finish_data["input_ids"] = inst
             finish_data["labels"] = labels
             finish_data[args.length_column_name] = len(inst)
@@ -194,11 +194,11 @@ def p2s_tnt_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, 
             inst = np.insert(inst, 0, tokenizer.bos_token_id)
 
         finish_data = {}
-        if with_split in args.train_dataset_prefix:
+        if with_split in setattr(args.dataset_prefix, "train", []):
             finish_data["input_ids"] = text
             finish_data["labels"] = text.copy()
             finish_data[args.length_column_name] = len(text)
-        elif with_split in args.valid_dataset_prefix + args.test_dataset_prefix:
+        elif with_split in getattr(args.dataset_prefix, "valid", []) + getattr(args.dataset_prefix, "test", []):
             finish_data["input_ids"] = inst
             finish_data["labels"] = labels
             finish_data[args.length_column_name] = len(inst)
@@ -308,7 +308,7 @@ def processing_datasets(
                     f"{repo_name}의 {dataset_key}크기는 {dataset_size}이지만 truncate_size는 {truncate_size} 크기를 조절하셈."
                 )
 
-        if dataset_key in train_args.train_dataset_prefix and train_args.do_train:
+        if dataset_key in train_args.dataset_prefix.get("train", []) and train_args.do_train:
             dataset = dataset.filter(
                 lambda length_ls: [length <= train_args.data_max_length for length in length_ls],  # type: ignore
                 num_proc=train_args.preprocessing_num_workers,
@@ -320,10 +320,10 @@ def processing_datasets(
             )
             train_dataset_ls.append(dataset)
 
-        if dataset_key in train_args.valid_dataset_prefix and train_args.do_eval:
+        if dataset_key in train_args.dataset_prefix.get("valid", []) and train_args.do_eval:
             valid_dataset_ls.append(dataset)
 
-        if dataset_key in train_args.test_dataset_prefix and train_args.do_predict:
+        if dataset_key in train_args.dataset_prefix.get("test", []) and train_args.do_predict:
             test_dataset_ls.append(dataset)
 
         if train_args.distributed_state.is_local_main_process:
@@ -351,7 +351,11 @@ def processing_datasets(
         truncate_map = train_args.data_truncate_map.get(repo_name, {})
         datasets = load_dataset(repo_name, data_name)
 
-        prefix_ls = train_args.train_dataset_prefix + train_args.valid_dataset_prefix + train_args.test_dataset_prefix
+        prefix_ls = (
+            train_args.dataset_prefix.get("train", [])
+            + train_args.dataset_prefix.get("valid", [])
+            + train_args.dataset_prefix.get("test", [])
+        )
         for prefix in list(datasets.keys()):
             if prefix in prefix_ls:
                 continue

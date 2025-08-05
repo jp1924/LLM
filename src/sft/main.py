@@ -63,22 +63,10 @@ class DataScriptArguments:
             "help": "데이터 전처리 시 배치를 사용할지 여부를 결정하는 값. True로 설정하면 데이터 전처리가 배치 단위로 처리된다."
         },
     )
-    train_dataset_prefix: List[str] = field(
-        default_factory=list,
+    dataset_prefix: dict = field(
+        default_factory=lambda: {"train": [], "valid": [], "test": []},
         metadata={
-            "help": "데이터셋 로드 시 학습 데이터를 구분하기 위해 사용되는 접두어 리스트. load_dataset 함수에서 학습 데이터 필터링에 활용된다."
-        },
-    )
-    valid_dataset_prefix: List[str] = field(
-        default_factory=list,
-        metadata={
-            "help": "데이터셋 로드 시 검증 데이터를 구분하기 위해 사용되는 접두어 리스트. load_dataset 함수에서 검증 데이터 필터링에 활용된다."
-        },
-    )
-    test_dataset_prefix: List[str] = field(
-        default_factory=list,
-        metadata={
-            "help": "데이터셋 로드 시 테스트 데이터를 구분하기 위해 사용되는 접두어 리스트. processing_datasets 함수에서 테스트 데이터 필터링에 활용된다."
+            "help": "데이터셋 로드 시 학습, 검증, 테스트 데이터를 구분하기 위해 사용되는 접두어 딕셔너리. 각 키는 'train', 'valid', 'test'로 구성된다."
         },
     )
     data_truncate_map: Optional[Union[dict, str]] = field(
@@ -107,6 +95,15 @@ class DataScriptArguments:
 
 @dataclass
 class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
+    _VALID_DICT_FIELDS = SFTConfig._VALID_DICT_FIELDS + [
+        "data_truncate_map",
+        "data_name_map",
+        "config_kwargs",
+        "model_init_kwargs",
+        "tokenizer_kwargs",
+        "dataset_prefix",
+    ]
+
     lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")
 
     chat_template: str = field(
