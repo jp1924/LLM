@@ -70,13 +70,13 @@ class DataScriptArguments:
         },
     )
     data_truncate_map: Optional[Union[dict, str]] = field(
-        default="{}",
+        default_factory=dict,
         metadata={
             "help": "데이터의 샘플 개수를 조절하기 위한 맵. 예: {'repo_name': {'train': 3000, 'validation': 1500}}. 데이터셋 처리 시 활용된다."
         },
     )
     data_name_map: Optional[Union[dict, str]] = field(
-        default="{}",
+        default_factory=dict,
         metadata={
             "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'data_config_name'}. 데이터셋 로드 시 사용된다."
         },
@@ -128,7 +128,7 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
     )
 
     tokenizer_kwargs: Optional[Union[dict, str]] = field(
-        default="{}",
+        default_factory=dict,
         metadata={"help": ""},
     )
 
