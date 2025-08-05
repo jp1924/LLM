@@ -93,6 +93,8 @@ class DataScriptArguments:
     )
 
 
+# NOTE: TrainingArguments, ModelArguments, DataArguments 이런식으로 나누면,
+#       args관리하기도 어렵고, wandb에는 TrainingArguments만 기록되는 문제가 있기 때문에 이런식으로 상속받아서 하나의 train_args에서 모든 것을 처리할 수 있게 만들었음.
 @dataclass
 class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
     _VALID_DICT_FIELDS = SFTConfig._VALID_DICT_FIELDS + [
@@ -158,106 +160,6 @@ class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
             "help": "Model id, file path or url pointing to a GenerationConfig json file, to use during prediction."
         },
     )
-
-    def __post_init__(self):
-        if self.output_dir is None:
-            raise ValueError("output_dir은 무조건 설정되어 있어야 한다.")
-
-        super().__post_init__()
-
-        def _convert_str_dict(passed_value: dict):
-            "Safely checks that a passed value is a dictionary and converts any string values to their appropriate types."
-            for key, value in passed_value.items():
-                if isinstance(value, dict):
-                    passed_value[key] = _convert_str_dict(value)
-                elif isinstance(value, str):
-                    # First check for bool and convert
-                    if value.lower() in ("true", "false"):
-                        passed_value[key] = value.lower() == "true"
-                    # Check for digit
-                    elif value.isdigit():
-                        passed_value[key] = int(value)
-                    elif value.replace(".", "", 1).isdigit():
-                        passed_value[key] = float(value)
-
-            return passed_value
-
-        _ADDITIONAL_VALID_DICT_FILEDS = [
-            "data_truncate_map",
-            "data_name_map",
-            "config_kwargs",
-            "model_init_kwargs",
-            "tokenizer_kwargs",
-        ]
-        _VALID_LIST_FIELDS = [
-            "train_dataset_prefix",
-            "valid_dataset_prefix",
-            "test_dataset_prefix",
-        ]
-
-        # copied from: transformers/training_args.py/__post_init__()
-        for field in _ADDITIONAL_VALID_DICT_FILEDS:
-            passed_value = getattr(self, field)
-            # We only want to do this if the str starts with a bracket to indiciate a `dict`
-            # else its likely a filename if supported
-            if isinstance(passed_value, str) and passed_value.startswith("{"):
-                loaded_dict = json.loads(passed_value)
-                # Convert str values to types if applicable
-                loaded_dict = _convert_str_dict(loaded_dict)
-                setattr(self, field, loaded_dict)
-            elif isinstance(passed_value, dict) or passed_value is None:
-                pass
-            else:
-                raise ValueError(f"{field}은 dict로 설정해야 함. {passed_value}")
-
-        for field in _VALID_LIST_FIELDS:
-            passed_value = getattr(self, field)
-            if isinstance(passed_value, str) and passed_value.startswith("["):
-                loaded_list = json.loads(passed_value)
-                setattr(self, field, loaded_list)
-            elif passed_value is None or isinstance(passed_value, list):
-                pass
-            else:
-                raise ValueError(f"{field}은 list로 설정해야 함. {passed_value}")
-
-        quantization_config = get_quantization_config(self)
-        self.config_kwargs = {
-            **self.config_kwargs,
-            "attn_implementation": self.attn_implementation,
-            "use_cache": False if self.gradient_checkpointing else True,
-        }
-
-        self.model_init_kwargs = {
-            **(self.model_init_kwargs if self.model_init_kwargs else {}),
-            "revision": self.model_revision,
-            "trust_remote_code": self.trust_remote_code,
-            "quantization_config": quantization_config,
-            "device_map": get_kbit_device_map() if quantization_config is not None else None,
-            "torch_dtype": (
-                self.torch_dtype if self.torch_dtype in ["auto", None] else getattr(torch, self.torch_dtype)
-            ),
-        }
-
-        self.tokenizer_kwargs = {
-            **(self.tokenizer_kwargs if self.tokenizer_kwargs else {}),
-            "revision": self.model_revision,
-            "trust_remote_code": self.trust_remote_code,
-        }
-
-        if self.chat_template:
-            self.tokenizer_kwargs["chat_template"] = self.chat_template
-
-        self.cache_dir = Path(self.cache_dir) if self.cache_dir else None
-        self.model_name_or_path = self.resume_from_checkpoint or self.model_name_or_path
-
-        if self.group_by_length:
-            logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
-
-        if self.dataset_kwargs:
-            logger.warning(
-                "skip_prepare_dataset이 True임! 이 코드엔 데이터셋을 준비하는 코드가 있기 때문에 자동으로 False로 바꿈."
-            )
-            self.dataset_kwargs["skip_prepare_dataset"] = False
 
     def to_dict(self):
         """
@@ -373,7 +275,7 @@ def valid(trainer: PackingTrainer, valid_datasets: Dataset) -> None:
 
 if "__main__" in __name__:
     parser = TrlParser([SFTScriptArguments])
-    train_args, remain_args = parser.parse_args_into_dataclasses(return_remaining_strings=True)
+    train_args, remain_args = parser.parse_args_and_config(return_remaining_strings=True)
 
     if remain_args and train_args.distributed_state.is_local_main_process:
         logger.info(f"remain_args: {remain_args}")
@@ -396,5 +298,37 @@ if "__main__" in __name__:
     transformers.utils.logging.set_verbosity(log_level)
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
+
+    # NOTE: train_args 조정 및 필요한 값들 설정
+    train_args.config_kwargs = {
+        **train_args.config_kwargs,
+        "attn_implementation": train_args.attn_implementation,
+        "use_cache": not train_args.gradient_checkpointing,
+    }
+
+    quantization_config = get_quantization_config(train_args)
+    train_args.model_init_kwargs = {
+        **(train_args.model_init_kwargs or {}),
+        "revision": train_args.model_revision,
+        "trust_remote_code": train_args.trust_remote_code,
+        "quantization_config": quantization_config,
+        "device_map": get_kbit_device_map() if quantization_config is not None else None,
+        "torch_dtype": train_args.torch_dtype
+        if train_args.torch_dtype in ["auto", None]
+        else getattr(torch, train_args.torch_dtype),
+    }
+    train_args.tokenizer_kwargs = {
+        **(train_args.tokenizer_kwargs or {}),
+        "revision": train_args.model_revision,
+        "trust_remote_code": train_args.trust_remote_code,
+    }
+    if train_args.chat_template:
+        train_args.tokenizer_kwargs["chat_template"] = train_args.chat_template
+
+    train_args.cache_dir = Path(train_args.cache_dir) if train_args.cache_dir else None
+    train_args.model_name_or_path = train_args.resume_from_checkpoint or train_args.model_name_or_path
+
+    if train_args.group_by_length:
+        logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
     main(train_args)
