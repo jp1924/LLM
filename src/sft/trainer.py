@@ -413,6 +413,8 @@ class PackingCollatorForLLM(DataCollatorMixin):
         self.return_tensors = return_tensors
         self.processor = processor
 
+        self.process_type = args.data_preprocessor_type
+
         if sample_dataset is not None and self.args.distributed_state.is_local_main_process:
             sample = sample_dataset[0]
             sample_check = self([sample])
@@ -443,7 +445,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
             for feature in features:
                 length = len(feature["input_ids"])
                 input_ids_ls.append(feature["input_ids"])
-                labels_ls.append(feature["labels"])
+                labels_ls.append(feature["labels"] if self.process_type != "pretrain" else feature["input_ids"])
                 position_ids_ls.append(torch.arange(length))
                 input_length_ls.append(length)
 
@@ -465,7 +467,10 @@ class PackingCollatorForLLM(DataCollatorMixin):
 
         feature_ls = flatten(features_ls)
         input_ids_features = [{"input_ids": feature["input_ids"]} for feature in feature_ls]
-        labels_features = [{"input_ids": feature["labels"]} for feature in feature_ls]
+        labels_features = [
+            {"input_ids": feature["labels"] if self.process_type != "pretrain" else feature["input_ids"]}
+            for feature in feature_ls
+        ]
 
         input_output = self.processor.pad(input_ids_features, padding_side="left", return_tensors="pt")
         labels_output = self.processor.pad(labels_features, padding_side="left", return_tensors="pt")
