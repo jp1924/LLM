@@ -199,7 +199,7 @@ def main(train_args: SFTScriptArguments) -> None:
 
     # NOTE: 학습에 활용할 값들을 로딩
     model_kwargs = {"config": config, **train_args.model_init_kwargs}
-    model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs).train()
     model.use_cache = False if train_args.gradient_checkpointing else True
     logger.info(f"Model parameter count: {get_model_param_count(model)}")
 
