@@ -1,5 +1,6 @@
 import logging
 import sys
+from collections import defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
@@ -63,7 +64,7 @@ class DataScriptArguments:
         },
     )
     dataset_prefix: dict = field(
-        default_factory=lambda: {"train": [], "valid": [], "test": []},
+        default_factory=lambda: defaultdict(list),
         metadata={
             "help": "데이터셋 로드 시 학습, 검증, 테스트 데이터를 구분하기 위해 사용되는 접두어 딕셔너리. 각 키는 'train', 'valid', 'test'로 구성된다."
         },
