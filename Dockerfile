@@ -3,8 +3,8 @@ FROM nvcr.io/nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04
 WORKDIR /root
 USER root
 
-ENV PATH /usr/local/cuda/bin:$PATH
-ENV LD_LIBRARY_PATH /usr/local/cuda/lib64:$LD_LIBRARY_PATH
+ENV PATH="/usr/local/cuda/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
 
 # 서버 관련 유틸
 RUN apt-get update && \
