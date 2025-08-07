@@ -18,13 +18,7 @@ from trainer import PackingCollatorForLLM, PackingTrainer
 from trl import ModelConfig, SFTConfig, TrlParser, get_kbit_device_map, get_peft_config, get_quantization_config
 
 import transformers
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    GenerationConfig,
-    set_seed,
-)
+from transformers import AutoConfig, AutoProcessor, GenerationConfig, set_seed
 from transformers.trainer_pt_utils import get_model_param_count
 
 
@@ -178,12 +172,12 @@ logger = transformers.utils.logging.get_logger("transformers")
 
 def main(train_args: SFTScriptArguments) -> None:
     # NOTE: dataset 전처리를 위한 값들을 우선 로딩
-    tokenizer = AutoTokenizer.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
+    processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     config_kwargs = {
         **train_args.config_kwargs,
-        "bos_token_id": tokenizer.bos_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-        "pad_token_id": tokenizer.pad_token_id,
+        "bos_token_id": processor.bos_token_id,
+        "eos_token_id": processor.eos_token_id,
+        "pad_token_id": processor.pad_token_id,
     }
     config = AutoConfig.from_pretrained(train_args.model_name_or_path, **config_kwargs)
 
@@ -193,14 +187,13 @@ def main(train_args: SFTScriptArguments) -> None:
         else nullcontext()
     ):
         train_dataset, valid_dataset, test_dataset = processing_datasets(
-            train_args,
-            tokenizer,
-            PROCESSOR_REGISTRY[train_args.data_preprocessor_type],
+            train_args, processor, PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
         )
 
     # NOTE: 학습에 활용할 값들을 로딩
     model_kwargs = {"config": config, **train_args.model_init_kwargs}
-    model = AutoModelForCausalLM.from_pretrained(train_args.model_name_or_path, **model_kwargs).train()
+    architecture = getattr(transformers, config.architectures[0])
+    model = architecture.from_pretrained(train_args.model_name_or_path, **model_kwargs).train()
     model.use_cache = False if train_args.gradient_checkpointing else True
     logger.info(f"Model parameter count: {get_model_param_count(model)}")
 
@@ -222,7 +215,7 @@ def main(train_args: SFTScriptArguments) -> None:
 
         compute_metrics = partial(
             METRICS_REGISTRY[train_args.data_preprocessor_type],
-            tokenizer=tokenizer,
+            tokenizer=processor,
             args=train_args,
         )
 
@@ -231,7 +224,7 @@ def main(train_args: SFTScriptArguments) -> None:
     collator = PackingCollatorForLLM(
         args=train_args,
         model=model,
-        processor=tokenizer,
+        processor=processor,
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 
@@ -239,7 +232,7 @@ def main(train_args: SFTScriptArguments) -> None:
         model=model,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset if train_args.eval_strategy != "no" else None,
-        processing_class=tokenizer,
+        processing_class=processor,
         data_collator=collator,
         args=train_args,
         compute_metrics=compute_metrics,
