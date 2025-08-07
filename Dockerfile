@@ -24,4 +24,4 @@ RUN uv pip install --system transformers accelerate datasets evaluate trl peft d
     bitsandbytes scipy sentencepiece pillow fastapi uvicorn unsloth==2025.7.3 unsloth-zoo==2025.7.4 xformers==0.0.29.post2 opensloth==0.1.8 \
     ruff natsort setproctitle glances[gpu] wandb cmake
 
-RUN uv pip install --system flash-attn --no-build-isolation
+RUN uv pip install --system https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl --no-build-isolation
