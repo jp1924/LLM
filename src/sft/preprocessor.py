@@ -622,7 +622,12 @@ def processing_datasets(
     valid_dataset = concat(valid_dataset_ls, "valid")
     test_dataset = concat(test_dataset_ls, "test")
 
-    if train_args.distributed_state.is_local_main_process and train_dataset:
+    # NOTE: pretrain과 같이 샘플의 개수가 너무 많은 경우 histogram 뽑는데 시간이 너무 오래 걸림.
+    if (
+        train_args.distributed_state.is_local_main_process
+        and train_dataset
+        and train_args.data_preprocessor_type != "pretrain"
+    ):
         logger.info("train-datasets")
         range_histogram(train_dataset["length"], 100, 50)
 
