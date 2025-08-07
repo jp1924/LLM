@@ -1,0 +1,100 @@
+env:
+  # WanDB
+  WANDB_PROJECT: "LLM"
+  WANDB_RUN_GROUP: 'NationalCorpus'
+  WANDB_WATCH: ""
+  # torch
+  TORCH_DISTRIBUTED_DEBUG: "OFF"
+  TORCHDYNAMO_VERBOSE: "1"
+  TORCHDYNAMO_DISABLE: "1"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,roundup_power2_divisions:[32:256,64:128,256:64,>:32]"
+  CUDA_DEVICE_ORDER: 'PCI_BUS_ID'
+  # accelerate
+  # accelerate launch의 config_file로 하지 않는 이유,
+  # 이유가 밝혀지지 않았는데 launch로 수행하니깐 FSDP가 정상적으로 동작하지 않아서 일단 이렇게 사용하는 중
+  ACCELERATE_USE_FSDP: 'true'
+  FSDP_VERSION: 2
+  FSDP_RESHARD_AFTER_FORWARD: 'true'
+  FSDP_STATE_DICT_TYPE: "FULL_STATE_DICT"
+  FSDP_AUTO_WRAP_POLICY: "TRANSFORMER_BASED_WRAP"
+  FSDP_CPU_RAM_EFFICIENT_LOADING: 'false'
+  FSDP_ACTIVATION_CHECKPOINTING: 'false'
+output_dir: "/root/output_dir/gemma-3-1b-pt/NationalCorpus"
+cache_dir: "/root/.cache/.[gemma-3-1b-pt]preprocess/NationalCorpus"
+model_name_or_path: 'google/gemma-3-1b-pt'
+# 데이터 전처리와 관련된 값
+do_data_main_process_first: false
+preprocessing_batched: true
+preprocessing_num_workers: 4
+preprocessing_batch_size: 1000
+data_preprocessor_type: "pretrain" # or pretrain 하면 preprocess.py에서 pretrain으로 처리
+dataset_repo_ls:
+  - "jp1924/CorpusForLLMNationalRecordsAndArchives"
+data_name_map:
+  jp1924/CorpusForLLMNationalRecordsAndArchives: CORPUS
+# data_truncate_map:
+#   jp1924/CorpusForLLMNationalRecordsAndArchives:
+#     train: 5000
+data_max_length: 4096
+dataset_prefix:
+  train:
+    - train
+  valid:
+    - validation
+  test:
+    - test
+# train & valid step과 관련된 값
+per_device_train_batch_size: 64
+gradient_accumulation_steps: 1
+per_device_eval_batch_size: 4
+eval_accumulation_steps: 1
+num_train_epochs: 1
+# train or valid or test 수행할지 말지 결정하는 값
+do_train: true
+do_predict: false
+do_eval: false
+# optim, scheduler와 관련된 값
+learning_rate: 2e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+optim: lomo
+# save & eval을 설정하는 값
+eval_strategy: 'no'
+eval_steps: 1
+save_strategy: 'epoch'
+save_steps: 500
+# logging과 관련된 값
+report_to: 'wandb'
+logging_strategy: 'steps'
+logging_steps: 1
+# 학습 최적화와 관련된 값
+bf16: true
+tf32: true
+weight_decay: 0
+torch_compile: true
+use_liger_kernel: true
+attn_implementation: flash_attention_2
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+## dataloader와 관련된 값
+dataloader_prefetch_factor: 5
+dataloader_num_workers: 4
+## packing과 관련된 값.
+spfhp_packing: true
+spfhp_packing_max_elem: 20
+# 기타 최적화
+include_num_input_tokens_seen: true
+include_tokens_per_second: true
+remove_unused_columns: true
+ddp_timeout: 18000000
+seed: 42
+run_name: "pretrain"
+########################
+# lora_task_type: CAUSAL_LM
+# lora_r: 16
+# lora_target_modules: .*language_model.*(q|v|k|o)_proj$
+# lora_alpha: 16
+# lora_dropout: 0
+# use_rslora: false
+# deepspeed: '/root/workspace/config/ZeRO_3_act_check.json'
