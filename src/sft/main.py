@@ -181,6 +181,9 @@ def main(train_args: SFTScriptArguments) -> None:
     }
     config = AutoConfig.from_pretrained(train_args.model_name_or_path, **config_kwargs)
 
+    if not processor.chat_template and train_args.data_preprocessor_type != "pretrain":
+        raise ValueError("chat template을 설정하지 않으면 코드가 정상적으로 동작하지 않는다.")
+
     with (
         train_args.main_process_first(desc="main_process_first")
         if train_args.do_data_main_process_first
