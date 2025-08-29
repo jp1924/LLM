@@ -21,8 +21,18 @@ from transformers import AutoConfig, AutoProcessor, GenerationConfig, set_seed
 from transformers.trainer_pt_utils import get_model_param_count
 
 
+# NOTE: TrainingArguments, ModelArguments, DataArguments 이런식으로 나누면,
+#       args관리하기도 어렵고, wandb에는 TrainingArguments만 기록되는 문제가 있기 때문에 이런식으로 상속받아서 하나의 train_args에서 모든 것을 처리할 수 있게 만들었음.
 @dataclass
-class DataScriptArguments:
+class SFTScriptArguments(SFTConfig, ModelConfig):
+    _VALID_DICT_FIELDS = SFTConfig._VALID_DICT_FIELDS + [
+        "data_truncate_map",
+        "data_name_map",
+        "config_kwargs",
+        "tokenizer_kwargs",
+        "dataset_prefix",
+    ]
+    # -------------------------- Datasets Args ------------------------- #
     dataset_repo_ls: List[str] = field(
         default_factory=list,
         metadata={
@@ -76,27 +86,13 @@ class DataScriptArguments:
     )
     do_data_main_process_first: bool = field(
         default=False,
-        metadata={
-            "help": "데이터 전처리를 메인 프로세스에서 먼저 실행할지 여부를 결정하는 값. main_process_first 컨텍스트에서 사용된다."
-        },
+        metadata={"help": "데이터 전처리를 메인 프로세스에서 먼저 실행할지 여부를 결정하는 값."},
     )
     cache_dir: Optional[str] = field(
         default=None,
-        metadata={"help": "캐시 파일을 저장할 디렉토리를 설정하는 값. 데이터셋 로드 및 모델 저장 시 사용된다."},
+        metadata={"help": "datasets.map이 수행된 후 저장되는 캐시 폴더를 지정하는 값."},
     )
-
-
-# NOTE: TrainingArguments, ModelArguments, DataArguments 이런식으로 나누면,
-#       args관리하기도 어렵고, wandb에는 TrainingArguments만 기록되는 문제가 있기 때문에 이런식으로 상속받아서 하나의 train_args에서 모든 것을 처리할 수 있게 만들었음.
-@dataclass
-class SFTScriptArguments(SFTConfig, DataScriptArguments, ModelConfig):
-    _VALID_DICT_FIELDS = SFTConfig._VALID_DICT_FIELDS + [
-        "data_truncate_map",
-        "data_name_map",
-        "config_kwargs",
-        "tokenizer_kwargs",
-        "dataset_prefix",
-    ]
+    # -------------------------- Training Args ------------------------- #
 
     lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")
 
