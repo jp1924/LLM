@@ -11,7 +11,6 @@ import datasets
 import optimization
 import torch
 from datasets import Dataset
-from metrics import METRICS_REGISTRY
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
 from setproctitle import setproctitle
 from trainer import PackingCollatorForLLM, PackingTrainer
@@ -212,18 +211,6 @@ def main(train_args: SFTScriptArguments) -> None:
             fullgraph=True,
         )
 
-    compute_metrics, callbacks = None, None
-    if train_args.data_preprocessor_type in METRICS_REGISTRY:
-        from callbacks import OnlyPicklingCallback
-
-        compute_metrics = partial(
-            METRICS_REGISTRY[train_args.data_preprocessor_type],
-            tokenizer=processor,
-            args=train_args,
-        )
-
-        callbacks = [OnlyPicklingCallback()]
-
     collator = PackingCollatorForLLM(
         args=train_args,
         model=model,
@@ -238,8 +225,6 @@ def main(train_args: SFTScriptArguments) -> None:
         processing_class=processor,
         data_collator=collator,
         args=train_args,
-        compute_metrics=compute_metrics,
-        callbacks=callbacks,
         peft_config=get_peft_config(train_args),
     )
 
