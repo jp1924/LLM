@@ -389,7 +389,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
         self,
         args: TrainingArguments,
         model: nn.Module,
-        processor: Union[ProcessorMixin, PreTrainedTokenizer],
+        tokenizer: Union[ProcessorMixin, PreTrainedTokenizer],
         return_tensors: Optional[str] = "pt",
         sample_dataset: Optional[Dataset] = None,
     ) -> None:
@@ -411,7 +411,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
         self.args = args
         self.model = model
         self.return_tensors = return_tensors
-        self.processor = processor
+        self.tokenizer = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
 
         self.process_type = args.data_preprocessor_type
 
@@ -422,14 +422,14 @@ class PackingCollatorForLLM(DataCollatorMixin):
             input_ids, labels = sample_check["input_ids"].tolist()[0], sample_check["labels"]
             labels = labels[labels != -100].tolist()
 
-            str_labels = [self.processor.convert_ids_to_tokens(token) for token in labels]
-            str_input_ids = [self.processor.convert_ids_to_tokens(token) for token in input_ids]
+            str_labels = [self.tokenizer.convert_ids_to_tokens(token) for token in labels]
+            str_input_ids = [self.tokenizer.convert_ids_to_tokens(token) for token in input_ids]
 
             logger.info(f"\nlabel-values: [{', '.join(str_labels)}]\ninput-values: [{', '.join(str_input_ids)}]\n")
 
-            if self.processor.bos_token_id and self.processor.bos_token_id not in input_ids:
+            if self.tokenizer.bos_token_id and self.tokenizer.bos_token_id not in input_ids:
                 raise ValueError("BOS 토큰이 데이터에서 검출되지 않는다. 전처리가 다시 필요하다.")
-            if self.processor.eos_token_id not in input_ids:
+            if self.tokenizer.eos_token_id not in input_ids:
                 raise ValueError("EOS 토큰이 데이터에서 검출되지 않는다. 전처리가 다시 필요하다.")
 
             if self.model.config._attn_implementation == "eager" and self.args.spfhp_packing:
@@ -472,8 +472,8 @@ class PackingCollatorForLLM(DataCollatorMixin):
             for feature in feature_ls
         ]
 
-        input_output = self.processor.pad(input_ids_features, padding_side="left", return_tensors="pt")
-        labels_output = self.processor.pad(labels_features, padding_side="left", return_tensors="pt")
+        input_output = self.tokenizer.pad(input_ids_features, padding_side="left", return_tensors="pt")
+        labels_output = self.tokenizer.pad(labels_features, padding_side="left", return_tensors="pt")
 
         batch = {
             "input_ids": input_output.input_ids,

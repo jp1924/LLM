@@ -168,11 +168,12 @@ logger = transformers.utils.logging.get_logger("transformers")
 def main(train_args: SFTScriptArguments) -> None:
     # NOTE: dataset 전처리를 위한 값들을 우선 로딩
     processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
     config_kwargs = {
         **train_args.config_kwargs,
-        "bos_token_id": processor.bos_token_id,
-        "eos_token_id": processor.eos_token_id,
-        "pad_token_id": processor.pad_token_id,
+        "bos_token_id": tokenizer.bos_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "pad_token_id": tokenizer.pad_token_id,
     }
     config = AutoConfig.from_pretrained(train_args.model_name_or_path, **config_kwargs)
 
@@ -210,7 +211,7 @@ def main(train_args: SFTScriptArguments) -> None:
     collator = PackingCollatorForLLM(
         args=train_args,
         model=model,
-        processor=processor,
+        tokenizer=processor,
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 
