@@ -42,5 +42,10 @@
     "python.testing.unittestEnabled": true,
     "[jsonc]": {
         "editor.defaultFormatter": "vscode.json-language-features"
-    }
+    },
+    "github.copilot.chat.commitMessageGeneration.instructions": [
+        {
+            "file": "/root/workspace/.vscode/commit_convention.md"
+        }
+    ],
 }
