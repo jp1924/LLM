@@ -245,9 +245,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
         return batch
 
     def torch_call(self, features_ls: Union[List[dict], List[List[dict]]]) -> dict:
-        if self.use_packing and self.model.training:
-            return self._pack_collate(features_ls)
-        elif self.use_packing and not self.model.training and self.args.eval_packing:
+        if self.use_packing and (self.args.eval_packing or self.model.training):
             return self._pack_collate(features_ls)
         else:
             return self._pad_collate(features_ls)

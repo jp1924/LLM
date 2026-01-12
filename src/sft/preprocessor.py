@@ -136,7 +136,7 @@ def sft_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
         labels, outputs = create_assistant_labels(tokenizer, row_dataset["conversations"], images=images)
 
         finish_data = {
-            "labels": np.array(labels),
+            "labels": labels,
             args.length_column_name: len(outputs.input_ids),
             **outputs,
         }
