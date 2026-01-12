@@ -3,21 +3,29 @@ import sys
 from collections import defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import datasets
 import optimization
 import torch
+import torch.nn as nn
 from datasets import Dataset
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
 from setproctitle import setproctitle
-from trainer import PackingCollatorForLLM, PackingTrainer
-from trl import ModelConfig, SFTConfig, TrlParser, get_kbit_device_map, get_peft_config, get_quantization_config
+from trl import (
+    ModelConfig,
+    SFTConfig,
+    SFTTrainer,
+    TrlParser,
+    get_kbit_device_map,
+    get_peft_config,
+    get_quantization_config,
+)
 
 import transformers
 from transformers import AutoConfig, AutoProcessor, GenerationConfig, set_seed
+from transformers.data.data_collator import DataCollatorMixin
 from transformers.trainer_pt_utils import get_model_param_count
 
 
@@ -51,7 +59,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
             "help": "학습에 활용될 데이터의 최대 길이를 설정하는 값. tokenizing이 수행된 후의 length 길이로 동작한다."
         },
     )
-
     preprocessing_num_workers: int = field(
         default=5,
         metadata={"help": "데이터 전처리에 활용할 프로세스의 수, 1 이면 싱글 프로세스로 동작한다."},
@@ -91,15 +98,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         default=None,
         metadata={"help": "The template for chat interactions."},
     )
-    spfhp_packing_max_elem: int = field(
-        default=10,
-        metadata={"help": "The maximum number of elements to pack together."},
-    )
-    # NOTE: SFTConfig에서 지원하는 packing args와 충돌을 피하기 위해 spfhp라는 값을 별도로 지정
-    spfhp_packing: bool = field(
-        default=False,
-        metadata={"help": "The maximum number of elements to pack together."},
-    )
 
     config_kwargs: Optional[Union[dict, str]] = field(
         default_factory=dict,
@@ -109,35 +107,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     tokenizer_kwargs: Optional[Union[dict, str]] = field(
         default_factory=dict,
         metadata={"help": ""},
-    )
-
-    sortish_sampler: bool = field(default=False, metadata={"help": "Whether to use SortishSampler or not."})
-    predict_with_generate: bool = field(
-        default=False, metadata={"help": "Whether to use generate to calculate generative metrics (ROUGE, BLEU)."}
-    )
-    generation_max_length: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The `max_length` to use on each evaluation loop when `predict_with_generate=True`. Will default "
-                "to the `max_length` value of the model configuration."
-            )
-        },
-    )
-    generation_num_beams: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The `num_beams` to use on each evaluation loop when `predict_with_generate=True`. Will default "
-                "to the `num_beams` value of the model configuration."
-            )
-        },
-    )
-    generation_config: Optional[Union[str, Path, GenerationConfig]] = field(
-        default=None,
-        metadata={
-            "help": "Model id, file path or url pointing to a GenerationConfig json file, to use during prediction."
-        },
     )
 
     def to_dict(self):
@@ -206,7 +175,7 @@ def main(train_args: SFTScriptArguments) -> None:
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 
-    trainer = PackingTrainer(
+    trainer = SFTTrainer(
         model=model,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset if train_args.eval_strategy != "no" else None,
@@ -226,7 +195,7 @@ def main(train_args: SFTScriptArguments) -> None:
         logger.info("do_predict 코드는 아직 작성 중")
 
 
-def train(trainer: PackingTrainer, args: SFTScriptArguments) -> None:
+def train(trainer: SFTTrainer, args: SFTScriptArguments) -> None:
     outputs = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     trainer.log_metrics("train", outputs.metrics)
@@ -234,7 +203,7 @@ def train(trainer: PackingTrainer, args: SFTScriptArguments) -> None:
 
 
 @torch.no_grad()
-def valid(trainer: PackingTrainer, valid_datasets: Dataset) -> None:
+def valid(trainer: SFTTrainer, valid_datasets: Dataset) -> None:
     valid_datasets = valid_datasets if valid_datasets else trainer.eval_dataset
     metrics = trainer.evaluate(valid_datasets)
     metrics = {key: obj for key, obj in metrics.items() if type(obj).__module__ == "builtins"}
