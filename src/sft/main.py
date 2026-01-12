@@ -96,6 +96,36 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         metadata={"help": ""},
     )
 
+    def __post_init__(self) -> None:
+        # train_args 조정 및 필요한 값들 설정
+        self.config_kwargs = {
+            **self.config_kwargs,
+            "attn_implementation": self.attn_implementation,
+            "use_cache": not self.gradient_checkpointing,
+        }
+
+        quantization_config = get_quantization_config(self)
+        self.model_init_kwargs = {
+            **(self.model_init_kwargs or {}),
+            "revision": self.model_revision,
+            "trust_remote_code": self.trust_remote_code,
+            "quantization_config": quantization_config,
+            "device_map": get_kbit_device_map() if quantization_config is not None else None,
+            "torch_dtype": self.dtype if self.dtype in ["auto", None] else getattr(torch, self.dtype),
+        }
+        self.tokenizer_kwargs = {
+            **(self.tokenizer_kwargs or {}),
+            "revision": self.model_revision,
+            "trust_remote_code": self.trust_remote_code,
+        }
+        if self.chat_template:
+            self.tokenizer_kwargs["chat_template"] = self.chat_template
+
+        self.model_name_or_path = self.resume_from_checkpoint or self.model_name_or_path
+
+        if self.group_by_length:
+            logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
+
 
 class PackingCollatorForLLM(DataCollatorMixin):
     def __init__(
@@ -300,34 +330,5 @@ if "__main__" in __name__:
     transformers.utils.logging.set_verbosity(log_level)
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
-
-    # train_args 조정 및 필요한 값들 설정
-    train_args.config_kwargs = {
-        **train_args.config_kwargs,
-        "attn_implementation": train_args.attn_implementation,
-        "use_cache": not train_args.gradient_checkpointing,
-    }
-
-    quantization_config = get_quantization_config(train_args)
-    train_args.model_init_kwargs = {
-        **(train_args.model_init_kwargs or {}),
-        "revision": train_args.model_revision,
-        "trust_remote_code": train_args.trust_remote_code,
-        "quantization_config": quantization_config,
-        "device_map": get_kbit_device_map() if quantization_config is not None else None,
-        "torch_dtype": train_args.dtype if train_args.dtype in ["auto", None] else getattr(torch, train_args.dtype),
-    }
-    train_args.tokenizer_kwargs = {
-        **(train_args.tokenizer_kwargs or {}),
-        "revision": train_args.model_revision,
-        "trust_remote_code": train_args.trust_remote_code,
-    }
-    if train_args.chat_template:
-        train_args.tokenizer_kwargs["chat_template"] = train_args.chat_template
-
-    train_args.model_name_or_path = train_args.resume_from_checkpoint or train_args.model_name_or_path
-
-    if train_args.group_by_length:
-        logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
     main(train_args)
