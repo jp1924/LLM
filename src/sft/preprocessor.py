@@ -1,11 +1,16 @@
 import json
+import os
+import os
 import time
+from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 import numpy as np
-from datasets import Dataset, concatenate_datasets, load_dataset
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
+from datasets.config import HF_DATASETS_CACHE
+from trl.data_utils import pack_dataset
 
-from transformers import PreTrainedTokenizer, ProcessorMixin, TrainingArguments
+from transformers import PreTrainedTokenizer, TrainingArguments
 from transformers import logging as hf_logging
 
 
@@ -13,47 +18,132 @@ hf_logging.set_verbosity_info()
 logger = hf_logging.get_logger("transformers")
 
 
+def get_sentencepiece_offset(tokenizer, input_ids):
+    """토큰 오프셋 계산"""
+    tokens = tokenizer.batch_decode([[token_id] for token_id in input_ids])
+    special_tokens_set = set(tokenizer.all_special_tokens) | set(tokenizer.added_tokens_encoder.keys())
+
+    text_parts = []
+    positions = []
+    current_pos = 0
+
+    for i, token in enumerate(tokens):
+        token_len = len(token)
+        positions.append(
+            (
+                i,  # idx
+                input_ids[i],  # token
+                current_pos,  # start
+                current_pos + token_len,  # end
+                token in special_tokens_set,  # is_special
+            )
+        )
+        text_parts.append(token)
+        current_pos += token_len
+
+    return positions, "".join(text_parts)
+
+
+def create_assistant_labels(tokenizer, conversations, images=None):
+    """
+    Assistant 응답 구간만 학습하도록 레이블 생성
+
+    Args:
+        tokenizer: HuggingFace tokenizer
+        conversations: 대화 메시지 리스트
+        images: 이미지 리스트 (optional)
+
+    Returns:
+        input_ids, labels, outputs
+    """
+    if len(conversations) % 2:
+        raise ValueError("Conversations should have an even number of messages (user starts, assistant ends).")
+
+    # Chat template 적용 및 토큰화
+    outputs = tokenizer(
+        **{
+            "text": tokenizer.apply_chat_template(conversations, tokenize=False),
+            **({"images": images} if images else {}),
+        },
+        return_attention_mask=False,
+        add_special_tokens=False,
+    )
+
+    text = tokenizer.decode(outputs.input_ids)
+
+    # BOS/EOS 토큰 추가
+    if tokenizer.bos_token and not text.strip().startswith(tokenizer.bos_token):
+        text = tokenizer.bos_token + text
+    if tokenizer.eos_token and not text.strip().endswith(tokenizer.eos_token):
+        text = text + tokenizer.eos_token
+
+    # 최종 인코딩 및 오프셋 계산
+    input_ids = tokenizer.encode(text, add_special_tokens=False)
+    outputs.update({"input_ids": input_ids})
+    offset_ls, text = get_sentencepiece_offset(tokenizer, input_ids)
+
+    # Assistant 응답만 필터링
+    answer_ls = [chat["content"] for chat in conversations if chat["role"] == "assistant"]
+    answer_ids_list = tokenizer(answer_ls, add_special_tokens=False).input_ids
+
+    # batch_decode로 한 번에 처리
+    all_answer_tokens = []
+    for ids in answer_ids_list:
+        tokens = tokenizer.batch_decode([[token_id] for token_id in ids])
+        all_answer_tokens.append("".join(tokens))
+
+    # 위치 계산
+    answer_pos_ls = []
+    for new_answer in all_answer_tokens:
+        start_idx = text.find(new_answer)
+        if start_idx == -1:
+            raise ValueError(f"tokenizer is weird. cannot find assistant content: {new_answer} > {text}")
+        answer_pos_ls.append((start_idx, start_idx + len(new_answer) + 1))
+
+    # 레이블 생성
+    labels = [-100] * len(input_ids)
+    for start_idx, end_idx in answer_pos_ls:
+        token_start_idx = None
+        token_end_idx = None
+
+        for idx, _, start, _, _ in offset_ls:
+            if start >= start_idx and token_start_idx is None:
+                token_start_idx = idx
+            if start < end_idx:
+                token_end_idx = idx
+            elif token_start_idx is not None:
+                break
+
+        if token_start_idx is not None and token_end_idx is not None:
+            labels[token_start_idx : token_end_idx + 1] = input_ids[token_start_idx : token_end_idx + 1]
+
+    return labels, outputs
+
+
 def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+    """통합된 SFT 데이터 전처리 함수 (이미지 처리 포함)"""
+    tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
     process_finish_ls = list()
+
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
+
+        images = row_dataset.get("images", None)
         for chat_turn in row_dataset["conversations"]:
-            chat_turn["content"] = chat_turn["content"].strip()
+            content = json.loads(chat_turn["text"]) if images else chat_turn["text"].strip()
+            chat_turn["content"] = content
 
-        inst, text, labels = (
-            row_dataset["conversations"][:-1],
-            row_dataset["conversations"],
-            row_dataset["conversations"][-1]["content"],
-        )
-        # chat format encoding
-        inst: np.ndarray = tokenizer.apply_chat_template(inst, apply_conversation_template=True, return_tensors="np")
-        text: np.ndarray = tokenizer.apply_chat_template(text, return_tensors="np")
-        labels: np.ndarray = tokenizer.encode(labels, return_tensors="np", add_special_tokens=False)
-        inst, text, labels = inst.squeeze(), text.squeeze(), labels.squeeze()
+        labels, outputs = create_assistant_labels(tokenizer, row_dataset["conversations"], images=images)
 
-        # verify special token
-        if not np.isin(text, tokenizer.eos_token_id).any():
-            text = np.append(text, tokenizer.eos_token_id)
-        if tokenizer.bos_token_id and not np.isin(text, tokenizer.bos_token_id).any():
-            text = np.insert(text, 0, tokenizer.bos_token_id)
-            inst = np.insert(inst, 0, tokenizer.bos_token_id)
-
-        finish_data = {}
-        if with_split in args.dataset_prefix["train"]:
-            labels = text.copy()
-            labels[: len(inst)] = -100
-
-            finish_data["input_ids"] = text
-            finish_data["labels"] = labels
-            finish_data[args.length_column_name] = len(text)
-
-        elif with_split in args.dataset_prefix["valid"] + args.dataset_prefix["test"]:
-            finish_data["input_ids"] = inst
-            finish_data["labels"] = labels
-            finish_data[args.length_column_name] = len(inst)
+        finish_data = {
+            "labels": np.array(labels),
+            args.length_column_name: len(outputs.input_ids),
+            **outputs,
+        }
 
         process_finish_ls.append(finish_data)
 
+    # 결과 딕셔너리 생성
     return_dict = dict()
     for res in process_finish_ls:
         for key, value in res.items():
