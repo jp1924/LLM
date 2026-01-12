@@ -1,6 +1,4 @@
 import json
-import os
-import os
 import time
 from pathlib import Path
 from typing import Callable, Optional, Tuple
@@ -210,44 +208,37 @@ def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map):
 
 
 def range_histogram(data, num_bins=50, width=50):
-    # 데이터의 최대값과 최소값 찾기
-    min_val = min(data)
-    max_val = max(data)
+    """데이터 분포를 히스토그램으로 시각화"""
+    if not data:
+        return
 
-    # 구간 크기 계산
+    min_val, max_val = min(data), max(data)
     bin_size = (max_val - min_val) / num_bins
 
-    # 각 구간별 빈도수 계산
+    # 빈도수 계산
     bins = [0] * num_bins
     for value in data:
         bin_index = min(int((value - min_val) / bin_size), num_bins - 1)
         bins[bin_index] += 1
 
-    # 최대 빈도수 찾기
     max_freq = max(bins)
 
-    # 히스토그램 출력
+    # 출력
     logger.info(f"\nHistogram (total {len(data)} items, {num_bins} bins)")
     logger.info("-" * 80)
     logger.info(f"Range{' ' * 18}Count  Distribution")
     logger.info("-" * 80)
 
-    for i in range(num_bins):
+    for i, count in enumerate(bins):
         start = min_val + (i * bin_size)
         end = min_val + ((i + 1) * bin_size)
-        bar_length = int((bins[i] / max_freq) * width)
-        bar = "█" * bar_length
-
-        # 구간과 빈도수, 막대 출력
-        logger.info(f"{start:8.0f}-{end:8.0f}: {bins[i]:6d} |{bar}")
+        bar = "█" * int((count / max_freq) * width)
+        logger.info(f"{start:8.0f}-{end:8.0f}: {count:6d} |{bar}")
 
     logger.info("-" * 80)
-    logger.info("\nStatistics:")
-    logger.info(f"데이터 개수: {len(data)}")
-    logger.info(f"최소값: {min_val:.0f}")
-    logger.info(f"최대값: {max_val:.0f}")
-    logger.info(f"평균값: {sum(data) / len(data):.2f}")
-    logger.info(f"구간 크기: {bin_size:.2f}")
+    logger.info(f"\nStatistics:")
+    logger.info(f"데이터 개수: {len(data)}, 최소값: {min_val:.0f}, 최대값: {max_val:.0f}")
+    logger.info(f"평균값: {sum(data) / len(data):.2f}, 구간 크기: {bin_size:.2f}")
 
 
 def processing_datasets(
