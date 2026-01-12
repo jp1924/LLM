@@ -358,9 +358,7 @@ if "__main__" in __name__:
         "trust_remote_code": train_args.trust_remote_code,
         "quantization_config": quantization_config,
         "device_map": get_kbit_device_map() if quantization_config is not None else None,
-        "torch_dtype": train_args.torch_dtype
-        if train_args.torch_dtype in ["auto", None]
-        else getattr(torch, train_args.torch_dtype),
+        "torch_dtype": train_args.dtype if train_args.dtype in ["auto", None] else getattr(torch, train_args.dtype),
     }
     train_args.tokenizer_kwargs = {
         **(train_args.tokenizer_kwargs or {}),
@@ -370,7 +368,6 @@ if "__main__" in __name__:
     if train_args.chat_template:
         train_args.tokenizer_kwargs["chat_template"] = train_args.chat_template
 
-    train_args.cache_dir = Path(train_args.cache_dir) if train_args.cache_dir else None
     train_args.model_name_or_path = train_args.resume_from_checkpoint or train_args.model_name_or_path
 
     if train_args.group_by_length:
