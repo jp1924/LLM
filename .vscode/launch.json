@@ -5,11 +5,19 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python 디버거: 현재 파일",
+            "name": "run sft debug",
             "type": "debugpy",
             "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal"
+            "module": "accelerate.commands.launch",
+            "console": "integratedTerminal",
+            "cwd": "/root/workspace/src/sft",
+            "justMyCode": false,
+            "args": [
+                "--config_file=/root/workspace/config/fsdp2.yaml",
+                "/root/workspace/src/sft/main.py",
+                "--config",
+                "/root/workspace/run_scripts/sft.yaml"
+            ],
         },
         {
             "name": "debug: ds sft main.py",
