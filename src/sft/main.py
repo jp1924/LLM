@@ -249,7 +249,7 @@ def main(train_args: SFTScriptArguments) -> None:
     model.use_cache = False if train_args.gradient_checkpointing else True
     logger.info(f"Model parameter count: {get_model_param_count(model)}")
 
-    # _no_split_modules에 model에 존재하지 않는 모듈이 있는 경우 FSDP에서 애러가 발생하기 때문에, 필터링이 필요로 함.
+    # FSDP에서 model에 존재하지 않는 모듈이 있는 경우 애러가 발생하기 때문에 _no_split_modules을 필터링 한다.
     exist_module = {module.__class__.__name__ for module in model.modules()}
     model._no_split_modules = list(set(model._no_split_modules).intersection(exist_module))
 

@@ -18,7 +18,7 @@ hf_logging.set_verbosity_info()
 logger = hf_logging.get_logger("transformers")
 
 
-def get_sentencepiece_offset(tokenizer, input_ids):
+def get_sentencepiece_offset(tokenizer, input_ids) -> Tuple[list, str]:
     """토큰 오프셋 계산"""
     tokens = tokenizer.batch_decode([[token_id] for token_id in input_ids])
     special_tokens_set = set(tokenizer.all_special_tokens) | set(tokenizer.added_tokens_encoder.keys())
@@ -44,7 +44,7 @@ def get_sentencepiece_offset(tokenizer, input_ids):
     return positions, "".join(text_parts)
 
 
-def create_assistant_labels(tokenizer, conversations, images=None):
+def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list, list, dict]:
     """
     Assistant 응답 구간만 학습하도록 레이블 생성
 
@@ -120,7 +120,7 @@ def create_assistant_labels(tokenizer, conversations, images=None):
     return labels, outputs
 
 
-def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+def sft_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArguments) -> Dict[str, list]:
     """통합된 SFT 데이터 전처리 함수 (이미지 처리 포함)"""
     tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
     process_finish_ls = list()
@@ -152,7 +152,7 @@ def sft_processor(example, with_split: str, tokenizer: PreTrainedTokenizer, args
     return return_dict
 
 
-def pretrain_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArguments):
+def pretrain_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArguments) -> Dict[str, list]:
     process_finish_ls = list()
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
@@ -183,7 +183,7 @@ PROCESSOR_REGISTRY = {"sft": sft_processor, "pretrain": pretrain_processor}
 #############################################################################################################
 
 
-def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map):
+def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tuple[Dict[str, str], Dict[str, str]]:
     """캐시 파일명 생성 헬퍼 함수"""
     model_name_or_path = (
         Path(train_args.model_name_or_path)
@@ -244,18 +244,6 @@ def check_dataset_cache_exists(
 
         return True
 
-    """
-    모든 데이터셋 split의 캐시가 존재하는지 확인
-
-    Args:
-        map_cache: map 캐시 파일 경로 딕셔너리
-        filter_cache: filter 캐시 파일 경로 딕셔너리
-        train_split_keys: train split 키 리스트
-        num_proc: 멀티프로세싱 worker 수
-
-    Returns:
-        모든 split의 캐시가 존재하면 True
-    """
     # map 캐시 확인
     for split_key, cache_path in map_cache.items():
         if not check_cache_files_exist(cache_path, num_proc):
@@ -272,7 +260,7 @@ def check_dataset_cache_exists(
     return True
 
 
-def range_histogram(data, num_bins=50, width=50):
+def range_histogram(data, num_bins=50, width=50) -> None:
     """데이터 분포를 히스토그램으로 시각화"""
     if not data:
         return
