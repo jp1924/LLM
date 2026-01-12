@@ -22,13 +22,12 @@ from trl import (
 )
 
 import transformers
-from transformers import AutoConfig, AutoProcessor, GenerationConfig, set_seed
+from transformers import AutoConfig, AutoProcessor, set_seed
 from transformers.data.data_collator import DataCollatorMixin
 from transformers.trainer_pt_utils import get_model_param_count
 
 
-# NOTE: TrainingArguments, ModelArguments, DataArguments 이런식으로 나누면,
-#       args관리하기도 어렵고, wandb에는 TrainingArguments만 기록되는 문제가 있기 때문에 이런식으로 상속받아서 하나의 train_args에서 모든 것을 처리할 수 있게 만들었음.
+# TrainingArguments, ModelArguments, DataArguments 이런식으로 나누면, args관리하기도 어렵고, wandb에는 TrainingArguments만 기록되는 문제가 있기 때문에 이런식으로 상속받아서 하나의 train_args에서 모든 것을 처리할 수 있게 만들었음.
 @dataclass
 class SFTScriptArguments(SFTConfig, ModelConfig):
     _VALID_DICT_FIELDS = SFTConfig._VALID_DICT_FIELDS + [
@@ -49,12 +48,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         default_factory=lambda: PROCESSOR_REGISTRY.keys(),
         metadata={
             "help": f"학습할 데이터의 전처리를 어떻게 할지 결정하는 값, {', '.join(PROCESSOR_REGISTRY.keys())} 를 지원한다."
-        },
-    )
-    data_max_length: int = field(
-        default=2048,
-        metadata={
-            "help": "학습에 활용될 데이터의 최대 길이를 설정하는 값. tokenizing이 수행된 후의 length 길이로 동작한다."
         },
     )
     preprocessing_num_workers: int = field(
@@ -102,18 +95,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         default_factory=dict,
         metadata={"help": ""},
     )
-
-    def to_dict(self):
-        """
-        Serializes this instance while replace `Enum` by their values and `GenerationConfig` by dictionaries (for JSON
-        serialization support). It obfuscates the token values by removing their value.
-        """
-        # filter out fields that are defined as field(init=False)
-        d = super().to_dict()
-        for k, v in d.items():
-            if isinstance(v, GenerationConfig):
-                d[k] = v.to_dict()
-        return d
 
 
 class PackingCollatorForLLM(DataCollatorMixin):
@@ -226,20 +207,19 @@ logger = transformers.utils.logging.get_logger("transformers")
 
 
 def main(train_args: SFTScriptArguments) -> None:
-    # NOTE: dataset 전처리를 위한 값들을 우선 로딩
     processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     config = AutoConfig.from_pretrained(train_args.model_name_or_path, **train_args.config_kwargs)
 
     train_dataset, valid_dataset, test_dataset = processing_datasets(train_args, processor)
 
-    # NOTE: 학습에 활용할 값들을 로딩
+    # 학습에 활용할 값들을 로딩
     model_kwargs = {"config": config, **train_args.model_init_kwargs}
     architecture = getattr(transformers, config.architectures[0].replace("FSDP", ""))
     model = architecture.from_pretrained(train_args.model_name_or_path, **model_kwargs).train()
     model.use_cache = False if train_args.gradient_checkpointing else True
     logger.info(f"Model parameter count: {get_model_param_count(model)}")
 
-    # NOTE: _no_split_modules에 model에 존재하지 않는 모듈이 있는 경우 FSDP에서 애러가 발생하기 때문에, 필터링이 필요로 함.
+    # _no_split_modules에 model에 존재하지 않는 모듈이 있는 경우 FSDP에서 애러가 발생하기 때문에, 필터링이 필요로 함.
     exist_module = {module.__class__.__name__ for module in model.modules()}
     model._no_split_modules = list(set(model._no_split_modules).intersection(exist_module))
 
@@ -321,7 +301,7 @@ if "__main__" in __name__:
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
 
-    # NOTE: train_args 조정 및 필요한 값들 설정
+    # train_args 조정 및 필요한 값들 설정
     train_args.config_kwargs = {
         **train_args.config_kwargs,
         "attn_implementation": train_args.attn_implementation,

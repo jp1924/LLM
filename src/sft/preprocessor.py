@@ -1,7 +1,9 @@
 import json
+import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
@@ -177,6 +179,7 @@ def pretrain_processor(example, _, tokenizer: PreTrainedTokenizer, args: Trainin
 
 PROCESSOR_REGISTRY = {"sft": sft_processor, "pretrain": pretrain_processor}
 
+
 #############################################################################################################
 
 
@@ -201,7 +204,7 @@ def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map):
     for split in splits:
         truncate_prefix = f"{truncate_map[split]}-" if split in truncate_map else ""
         filter_cache[split] = (
-            cache_dir / f"filter_{truncate_prefix}{train_args.data_max_length}_{data_name}-{split}_preprocessor.arrow"
+            cache_dir / f"filter_{truncate_prefix}{train_args.max_length}_{data_name}-{split}_preprocessor.arrow"
         ).as_posix()
 
     return map_cache, filter_cache
@@ -304,9 +307,7 @@ def range_histogram(data, num_bins=50, width=50):
 
 
 def processing_datasets(
-    train_args: TrainingArguments,
-    tokenizer: PreTrainedTokenizer,
-    func: Callable,
+    train_args: TrainingArguments, tokenizer: PreTrainedTokenizer
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
     if train_args.data_preprocessor_type not in PROCESSOR_REGISTRY:
         raise ValueError(f"알 수 없는 데이터 프로세서 타입: {train_args.data_preprocessor_type}")
@@ -351,61 +352,61 @@ def processing_datasets(
             if use_main_process_first
             else nullcontext()
         ):
-        # 전처리 (토크나이징 등)
-        datasets = datasets.map(
-            func,
-            num_proc=train_args.preprocessing_num_workers,
-            load_from_cache_file=True,
-            with_split=True,
-            batched=True,
-            batch_size=train_args.preprocessing_batch_size,
-            cache_file_names=map_cache,
-            remove_columns=set(sum(datasets.column_names.values(), [])),
-            desc=f"preprocess-{repo_name}",
-            fn_kwargs={"tokenizer": tokenizer, "args": train_args},
-        )
-
-        # 각 split 처리
-        for split_key, dataset in datasets.items():
-            original_size = len(dataset)
-
-            # 크기 제한 (truncate)
-            if split_key in truncate_map:
-                truncate_size = truncate_map[split_key]
-                if len(dataset) > truncate_size:
-                    dataset = dataset.shuffle().select(range(truncate_size))
-                elif is_main:
-                    logger.info(f"{repo_name}/{split_key}: 크기 {len(dataset)} <= truncate {truncate_size}")
-
-            # 길이 필터링 (train만)
-            if split_key in train_args.dataset_prefix["train"] and train_args.do_train:
-                dataset = dataset.filter(
-                        lambda lengths: [l <= train_args.max_length for l in lengths],
-                    num_proc=train_args.preprocessing_num_workers,
-                    input_columns=[train_args.length_column_name],
-                    cache_file_name=filter_cache[split_key] if filter_cache else None,
-                        load_from_cache_file=True,
-                    batched=True,
-                    batch_size=train_args.preprocessing_batch_size,
-                    desc=f"filter-{repo_name}/{split_key}",
+            # 전처리 (토크나이징 등)
+            datasets = datasets.map(
+                func,
+                num_proc=train_args.preprocessing_num_workers,
+                load_from_cache_file=True,
+                with_split=True,
+                batched=True,
+                batch_size=train_args.preprocessing_batch_size,
+                cache_file_names=map_cache,
+                remove_columns=set(sum(datasets.column_names.values(), [])),
+                desc=f"preprocess-{repo_name}",
+                fn_kwargs={"tokenizer": tokenizer, "args": train_args},
             )
 
-            # 로깅
-            if is_main:
-                top_lengths = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
-                logger.info(f"{repo_name}/{split_key}-length: {[int(l) for l in top_lengths]}")
-                logger.info(f"{repo_name}/{split_key}-size: {original_size} -> {len(dataset)}")
+            # 각 split 처리
+            for split_key, dataset in datasets.items():
+                original_size = len(dataset)
 
-            # split별로 분류
-            for split_type, prefixes in train_args.dataset_prefix.items():
-                split_type = "predict" if split_type == "test" else split_type
-                if split_key in prefixes:
-                    do_flag = getattr(
-train_args,
-f"do_{split_type if split_type != 'valid' else 'eval'}",
-)
-                    if do_flag:
-                        datasets_by_split[split_type].append(dataset)
+                # 크기 제한 (truncate)
+                if split_key in truncate_map:
+                    truncate_size = truncate_map[split_key]
+                    if len(dataset) > truncate_size:
+                        dataset = dataset.shuffle().select(range(truncate_size))
+                    elif is_main:
+                        logger.info(f"{repo_name}/{split_key}: 크기 {len(dataset)} <= truncate {truncate_size}")
+
+                # 길이 필터링 (train만)
+                if split_key in train_args.dataset_prefix["train"] and train_args.do_train:
+                    dataset = dataset.filter(
+                        lambda lengths: [l <= train_args.max_length for l in lengths],
+                        num_proc=train_args.preprocessing_num_workers,
+                        input_columns=[train_args.length_column_name],
+                        cache_file_name=filter_cache[split_key] if filter_cache else None,
+                        load_from_cache_file=True,
+                        batched=True,
+                        batch_size=train_args.preprocessing_batch_size,
+                        desc=f"filter-{repo_name}/{split_key}",
+                    )
+
+                # 로깅
+                if is_main:
+                    top_lengths = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
+                    logger.info(f"{repo_name}/{split_key}-length: {[int(l) for l in top_lengths]}")
+                    logger.info(f"{repo_name}/{split_key}-size: {original_size} -> {len(dataset)}")
+
+                # split별로 분류
+                for split_type, prefixes in train_args.dataset_prefix.items():
+                    split_type = "predict" if split_type == "test" else split_type
+                    if split_key in prefixes:
+                        do_flag = getattr(
+                            train_args,
+                            f"do_{split_type if split_type != 'valid' else 'eval'}",
+                        )
+                        if do_flag:
+                            datasets_by_split[split_type].append(dataset)
 
     # 데이터셋 병합
     def merge_datasets(dataset_list, name):
@@ -421,17 +422,25 @@ f"do_{split_type if split_type != 'valid' else 'eval'}",
     valid_dataset = merge_datasets(datasets_by_split["valid"], "valid")
     test_dataset = merge_datasets(datasets_by_split["test"], "test")
 
-    # # 히스토그램 (pretrain 제외)
-    # if is_main and train_dataset and train_args.data_preprocessor_type != "pretrain":
-    #     logger.info("train-datasets")
-    #     range_histogram(train_dataset["length"], 100, 50)
-
     if is_main:
         logger.info(f"load_dataset_time: {time.time() - start_time:.2f}s")
 
+    # Packing
     if train_dataset and train_args.packing:
+        train_dataset = train_dataset.remove_columns("length")
         train_dataset = pack_dataset(
-            train_dataset, train_args.max_length, train_args.packing_strategy, {"desc": "Packing dataset"}
+            train_dataset,
+            train_args.max_length,
+            train_args.packing_strategy,
+            {"desc": "Packing dataset"},
+        )
+    if valid_dataset and train_args.packing and train_args.eval_packing:
+        valid_dataset = valid_dataset.remove_columns("length")
+        valid_dataset = pack_dataset(
+            valid_dataset,
+            train_args.max_length,
+            train_args.packing_strategy,
+            {"desc": "Packing eval dataset"},
         )
 
     return train_dataset, valid_dataset, test_dataset
