@@ -122,7 +122,7 @@ class EvalHarnessCallBack(TrainerCallback):
         tokenizer,
         tasks: List[str],
         eval_steps=None,
-        eval_start=None,
+        eval_start=0,
         do_init_eval=False,
         eval_batch_size=32,
     ) -> None:
@@ -142,7 +142,6 @@ class EvalHarnessCallBack(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        self.log_likelihood_evaluate(args, state, control, **kwargs)
         if state.global_step == 0 and self.do_init_eval:
             self.log_likelihood_evaluate(args, state, control, **kwargs)
         if (

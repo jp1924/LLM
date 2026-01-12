@@ -96,6 +96,21 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         metadata={"help": ""},
     )
 
+    # -------------------------- Eval Args ------------------------- #
+
+    eval_harness_tasks: List[str] = field(
+        default=None,
+        metadata={"help": "평가에 활용할 lm-eval-harness의 태스크 리스트."},
+    )
+    eval_steps: int = field(
+        default=1000,
+        metadata={"help": "몇 스텝마다 eval을 수행할지 결정하는 값."},
+    )
+    do_init_eval: bool = field(
+        default=False,
+        metadata={"help": "학습 시작 전에 eval을 수행할지 결정하는 값."},
+    )
+
     def __post_init__(self) -> None:
         # train_args 조정 및 필요한 값들 설정
         self.config_kwargs = {
@@ -273,6 +288,7 @@ def main(train_args: SFTScriptArguments) -> None:
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 
+    train_args.packing = False
     trainer = SFTTrainer(
         model=model,
         train_dataset=train_dataset,
@@ -282,6 +298,18 @@ def main(train_args: SFTScriptArguments) -> None:
         args=train_args,
         peft_config=get_peft_config(train_args),
     )
+    if train_args.eval_harness_tasks is not None:
+        from callbacks import EvalHarnessCallBack
+
+        trainer.add_callback(
+            EvalHarnessCallBack(
+                trainer,
+                processor,
+                train_args.eval_harness_tasks,
+                eval_steps=train_args.eval_steps,
+                do_init_eval=train_args.do_init_eval,
+            )
+        )
 
     if train_args.do_train and train_dataset:
         train(trainer, train_args)
