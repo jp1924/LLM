@@ -60,12 +60,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         default=1000,
         metadata={"help": "데이터 전처리 시 사용할 배치 크기를 설정하는 값."},
     )
-    preprocessing_batched: bool = field(
-        default=True,
-        metadata={
-            "help": "데이터 전처리 시 배치를 사용할지 여부를 결정하는 값. True로 설정하면 데이터 전처리가 배치 단위로 처리된다."
-        },
-    )
     dataset_prefix: dict = field(
         default_factory=lambda: defaultdict(list),
         metadata={
@@ -88,10 +82,7 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         default=False,
         metadata={"help": "데이터 전처리를 메인 프로세스에서 먼저 실행할지 여부를 결정하는 값."},
     )
-    cache_dir: Optional[str] = field(
-        default=None,
-        metadata={"help": "datasets.map이 수행된 후 저장되는 캐시 폴더를 지정하는 값."},
-    )
+
     # -------------------------- Training Args ------------------------- #
 
     lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")

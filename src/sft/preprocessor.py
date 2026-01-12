@@ -182,6 +182,33 @@ PROCESSOR_REGISTRY = {"sft": sft_processor, "pretrain": pretrain_processor}
 #############################################################################################################
 
 
+def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map):
+    """캐시 파일명 생성 헬퍼 함수"""
+    model_name_or_path = (
+        Path(train_args.model_name_or_path)
+        if isinstance(train_args.model_name_or_path, str)
+        else train_args.model_name_or_path
+    )
+    repo_name = Path(repo_name) if isinstance(repo_name, str) else repo_name
+    run_name = train_args.run_name.replace("/", "_")
+
+    cache_dir = HF_DATASETS_CACHE / "preprocess_cache" / model_name_or_path.name / run_name / repo_name.name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # map 캐시: 전처리 결과 저장
+    map_cache = {split: (cache_dir / f"map_{data_name}-{split}_preprocessor.arrow").as_posix() for split in splits}
+
+    # filter 캐시: 필터링 결과 저장
+    filter_cache = {}
+    for split in splits:
+        truncate_prefix = f"{truncate_map[split]}-" if split in truncate_map else ""
+        filter_cache[split] = (
+            cache_dir / f"filter_{truncate_prefix}{train_args.data_max_length}_{data_name}-{split}_preprocessor.arrow"
+        ).as_posix()
+
+    return map_cache, filter_cache
+
+
 def range_histogram(data, num_bins=50, width=50):
     # 데이터의 최대값과 최소값 찾기
     min_val = min(data)
@@ -228,120 +255,107 @@ def processing_datasets(
     tokenizer: PreTrainedTokenizer,
     func: Callable,
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
-    def process_dataset(dataset, dataset_key, repo_name, truncate_map, filter_cache_file_name):
-        original_size = len(dataset)
-
-        if dataset_key in truncate_map:
-            truncate_size = truncate_map[dataset_key]
-            dataset_size = len(dataset)
-            dataset = dataset if dataset_size <= truncate_size else dataset.shuffle().select(range(truncate_size))
-            if dataset_size <= truncate_size and train_args.distributed_state.is_local_main_process:
-                logger.info(
-                    f"{repo_name}의 {dataset_key}크기는 {dataset_size}이지만 truncate_size는 {truncate_size} 크기를 조절하셈."
-                )
-
-        if dataset_key in train_args.dataset_prefix["train"] and train_args.do_train:
-            dataset = dataset.filter(
-                lambda length_ls: [length <= train_args.data_max_length for length in length_ls],  # type: ignore
-                num_proc=train_args.preprocessing_num_workers,
-                input_columns=[train_args.length_column_name],
-                cache_file_name=filter_cache_file_name[dataset_key],
-                batched=train_args.preprocessing_batched,
-                batch_size=train_args.preprocessing_batch_size,
-                desc=f"length-filtering-{repo_name}/{dataset_key}",
-            )
-            train_dataset_ls.append(dataset)
-
-        if dataset_key in train_args.dataset_prefix["valid"] and train_args.do_eval:
-            valid_dataset_ls.append(dataset)
-
-        if dataset_key in train_args.dataset_prefix["test"] and train_args.do_predict:
-            test_dataset_ls.append(dataset)
-
-        if train_args.distributed_state.is_local_main_process:
-            length_ls = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
-            length_ls = [int(length) for length in length_ls]
-            logger.info(f"{repo_name}/{dataset_key}-length: {length_ls}")
-            logger.info(f"{repo_name}/{dataset_key}-size: {original_size} -> {len(dataset)}")
-
-    def concat(datasets_ls, dataset_type):
-        if datasets_ls:
-            dataset = concatenate_datasets(datasets_ls)
-            dataset.set_format("pt")
-            if train_args.distributed_state.is_local_main_process:
-                logger.info(f"{dataset_type}_dataset:\n{dataset}")
-            return dataset
-        return None
+    """데이터셋 로드 및 전처리"""
 
     start_time = time.time()
-    train_dataset_ls, valid_dataset_ls, test_dataset_ls = [], [], []
-    for repo_name in train_args.dataset_repo_ls:
-        if train_args.distributed_state.is_local_main_process:
-            logger.info(f"load-{repo_name}")
+    is_main = train_args.distributed_state.is_local_main_process
 
-        data_name = train_args.data_name_map.get(repo_name, None)
-        truncate_map = train_args.data_truncate_map.get(repo_name, {})
+    # 데이터셋 저장소
+    datasets_by_split = {"train": [], "valid": [], "test": []}
+
+    for repo_name in train_args.dataset_repo_ls:
+        if is_main:
+            logger.info(f"Loading {repo_name}")
+
+        # 데이터셋 로드
+        data_name = train_args.data_name_map.get(repo_name)
+        truncate_map = train_args.data_truncate_map.get(repo_name, {}) or {}
         datasets = load_dataset(repo_name, data_name)
 
-        prefix_ls = (
-            train_args.dataset_prefix["train"] + train_args.dataset_prefix["valid"] + train_args.dataset_prefix["test"]
-        )
-        for prefix in list(datasets.keys()):
-            if prefix in prefix_ls:
-                continue
-            datasets.pop(prefix, None)
+        # 필요한 split만 유지
+        all_prefixes = sum(train_args.dataset_prefix.values(), [])
+        datasets = DatasetDict({k: v for k, v in datasets.items() if k in all_prefixes})
 
-        map_cache_file_name, filter_cache_file_name = None, None
-        if train_args.cache_dir is not None:
-            name = repo_name.split("/")[-1]
-            name = f"{name}-{data_name}" if data_name else name
+        # 캐시 파일명 생성
+        map_cache, filter_cache = _get_cache_dir(train_args, repo_name, data_name, datasets.keys(), truncate_map)
 
-            map_cache_file_name = {
-                x: train_args.cache_dir.joinpath(f"map_{name}-{x}_preprocessor.arrow").as_posix() for x in datasets
-            }
-            filter_cache_file_name = {
-                x: train_args.cache_dir.joinpath(
-                    f"filter_{f'{truncate_map[x]}-' if x in truncate_map else ''}{train_args.data_max_length}_{name}-{x}_preprocessor.arrow"
-                ).as_posix()
-                for x in datasets
-            }
-
+        # 전처리 (토크나이징 등)
         datasets = datasets.map(
             func,
             num_proc=train_args.preprocessing_num_workers,
             load_from_cache_file=True,
             with_split=True,
-            batched=train_args.preprocessing_batched,
-            cache_file_names=map_cache_file_name,
+            batched=True,
             batch_size=train_args.preprocessing_batch_size,
+            cache_file_names=map_cache,
             remove_columns=set(sum(datasets.column_names.values(), [])),
             desc=f"preprocess-{repo_name}",
             fn_kwargs={"tokenizer": tokenizer, "args": train_args},
         )
 
-        for dataset_key in datasets:
-            process_dataset(
-                datasets[dataset_key],
-                dataset_key,
-                repo_name,
-                truncate_map,
-                filter_cache_file_name,
+        # 각 split 처리
+        for split_key, dataset in datasets.items():
+            original_size = len(dataset)
+
+            # 크기 제한 (truncate)
+            if split_key in truncate_map:
+                truncate_size = truncate_map[split_key]
+                if len(dataset) > truncate_size:
+                    dataset = dataset.shuffle().select(range(truncate_size))
+                elif is_main:
+                    logger.info(f"{repo_name}/{split_key}: 크기 {len(dataset)} <= truncate {truncate_size}")
+
+            # 길이 필터링 (train만)
+            if split_key in train_args.dataset_prefix["train"] and train_args.do_train:
+                dataset = dataset.filter(
+                    lambda lengths: [l <= train_args.data_max_length for l in lengths],
+                    num_proc=train_args.preprocessing_num_workers,
+                    input_columns=[train_args.length_column_name],
+                    cache_file_name=filter_cache[split_key] if filter_cache else None,
+                    batched=True,
+                    batch_size=train_args.preprocessing_batch_size,
+                    desc=f"filter-{repo_name}/{split_key}",
             )
 
-    train_dataset = concat(train_dataset_ls, "train")
-    valid_dataset = concat(valid_dataset_ls, "valid")
-    test_dataset = concat(test_dataset_ls, "test")
+            # 로깅
+            if is_main:
+                top_lengths = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
+                logger.info(f"{repo_name}/{split_key}-length: {[int(l) for l in top_lengths]}")
+                logger.info(f"{repo_name}/{split_key}-size: {original_size} -> {len(dataset)}")
 
-    # NOTE: pretrain과 같이 샘플의 개수가 너무 많은 경우 histogram 뽑는데 시간이 너무 오래 걸림.
-    if (
-        train_args.distributed_state.is_local_main_process
-        and train_dataset
-        and train_args.data_preprocessor_type != "pretrain"
-    ):
-        logger.info("train-datasets")
-        range_histogram(train_dataset["length"], 100, 50)
+            # split별로 분류
+            for split_type, prefixes in train_args.dataset_prefix.items():
+                split_type = "predict" if split_type == "test" else split_type
+                if split_key in prefixes:
+                    do_flag = getattr(train_args, f"do_{split_type if split_type != 'valid' else 'eval'}")
+                    if do_flag:
+                        datasets_by_split[split_type].append(dataset)
 
-    if train_args.distributed_state.is_local_main_process:
-        logger.info(f"load_dataset_time: {time.time() - start_time:.2f}")
+    # 데이터셋 병합
+    def merge_datasets(dataset_list, name):
+        if not dataset_list:
+            return None
+        combined = concatenate_datasets(dataset_list)
+        combined.set_format("pt")
+        if is_main:
+            logger.info(f"{name}_dataset:\n{combined}")
+        return combined
+
+    train_dataset = merge_datasets(datasets_by_split["train"], "train")
+    valid_dataset = merge_datasets(datasets_by_split["valid"], "valid")
+    test_dataset = merge_datasets(datasets_by_split["test"], "test")
+
+    # # 히스토그램 (pretrain 제외)
+    # if is_main and train_dataset and train_args.data_preprocessor_type != "pretrain":
+    #     logger.info("train-datasets")
+    #     range_histogram(train_dataset["length"], 100, 50)
+
+    if is_main:
+        logger.info(f"load_dataset_time: {time.time() - start_time:.2f}s")
+
+    if train_dataset and train_args.packing:
+        train_dataset = pack_dataset(
+            train_dataset, train_args.max_length, train_args.packing_strategy, {"desc": "Packing dataset"}
+        )
 
     return train_dataset, valid_dataset, test_dataset
