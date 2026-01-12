@@ -234,17 +234,7 @@ logger = transformers.utils.logging.get_logger("transformers")
 def main(train_args: SFTScriptArguments) -> None:
     # NOTE: dataset 전처리를 위한 값들을 우선 로딩
     processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
-    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
-    config_kwargs = {
-        **train_args.config_kwargs,
-        "bos_token_id": tokenizer.bos_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-        "pad_token_id": tokenizer.pad_token_id,
-    }
-    config = AutoConfig.from_pretrained(train_args.model_name_or_path, **config_kwargs)
-
-    if not processor.chat_template and train_args.data_preprocessor_type != "pretrain":
-        raise ValueError("chat template을 설정하지 않으면 코드가 정상적으로 동작하지 않는다.")
+    config = AutoConfig.from_pretrained(train_args.model_name_or_path, **train_args.config_kwargs)
 
     with (
         train_args.main_process_first(desc="main_process_first")
