@@ -401,7 +401,7 @@ def processing_datasets(
         if not dataset_list:
             return None
         combined = concatenate_datasets(dataset_list)
-        combined.set_format("pt")
+        None if train_args.packing else combined.set_format("pt")
         if is_main:
             logger.info(f"{name}_dataset:\n{combined}")
         return combined
@@ -422,6 +422,9 @@ def processing_datasets(
             train_args.packing_strategy,
             {"desc": "Packing dataset"},
         )
+        train_dataset = train_dataset.rename_column("seq_lengths", train_args.length_column_name)
+        train_dataset.set_format("pt")
+
     if valid_dataset and train_args.packing and train_args.eval_packing:
         valid_dataset = valid_dataset.remove_columns("length")
         valid_dataset = pack_dataset(
@@ -430,5 +433,7 @@ def processing_datasets(
             train_args.packing_strategy,
             {"desc": "Packing eval dataset"},
         )
+        valid_dataset = valid_dataset.rename_column("seq_lengths", train_args.length_column_name)
+        valid_dataset.set_format("pt")
 
     return train_dataset, valid_dataset, test_dataset

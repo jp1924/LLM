@@ -126,6 +126,9 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
+        SFTConfig.__post_init__(self)
+        ModelConfig.__post_init__(self)
+
 
 class PackingCollatorForLLM(DataCollatorMixin):
     def __init__(
@@ -155,6 +158,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
         self.model = model
         self.return_tensors = return_tensors
         self.tokenizer = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+        self.use_packing = self.args.packing
 
         self.process_type = args.data_preprocessor_type
 
@@ -165,8 +169,8 @@ class PackingCollatorForLLM(DataCollatorMixin):
             input_ids, labels = sample_check["input_ids"].tolist()[0], sample_check["labels"]
             labels = labels[labels != -100].tolist()
 
-            str_labels = [self.tokenizer.convert_ids_to_tokens(token) for token in labels]
-            str_input_ids = [self.tokenizer.convert_ids_to_tokens(token) for token in input_ids]
+            str_labels = [self.tokenizer.convert_ids_to_tokens(token).replace("\n", "/n") for token in labels]
+            str_input_ids = [self.tokenizer.convert_ids_to_tokens(token).replace("\n", "/n") for token in input_ids]
 
             logger.info(f"\nlabel-values: [{', '.join(str_labels)}]\ninput-values: [{', '.join(str_input_ids)}]\n")
 
@@ -175,7 +179,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
             if self.tokenizer.eos_token_id not in input_ids:
                 raise ValueError("EOS 토큰이 데이터에서 검출되지 않는다. 전처리가 다시 필요하다.")
 
-            if self.model.config._attn_implementation == "eager" and self.args.spfhp_packing:
+            if self.model.config._attn_implementation == "eager" and self.use_packing:
                 msg = "attention implementation이 eager인데, packing을 사용하고 있다. flash attention으로 변경해라."
                 raise ValueError(msg)
 
@@ -226,8 +230,9 @@ class PackingCollatorForLLM(DataCollatorMixin):
         return batch
 
     def torch_call(self, features_ls: Union[List[dict], List[List[dict]]]) -> dict:
-        use_packing = getattr(self.args, "spfhp_packing", False)
-        if use_packing and self.model.training:
+        if self.use_packing and self.model.training:
+            return self._pack_collate(features_ls)
+        elif self.use_packing and not self.model.training and self.args.eval_packing:
             return self._pack_collate(features_ls)
         else:
             return self._pad_collate(features_ls)
