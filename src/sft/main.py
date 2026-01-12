@@ -96,7 +96,7 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         metadata={"help": ""},
     )
 
-    # -------------------------- Eval Args ------------------------- #
+    # -------------------------- Evaluate Args ------------------------- #
 
     eval_harness_tasks: List[str] = field(
         default=None,
@@ -288,7 +288,7 @@ def main(train_args: SFTScriptArguments) -> None:
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 
-    train_args.packing = False
+    setattr(train_args, "packing", False)  # processing_datasets에서 이미 패킹이 적용되었기 때문에 False로 설정
     trainer = SFTTrainer(
         model=model,
         train_dataset=train_dataset,
