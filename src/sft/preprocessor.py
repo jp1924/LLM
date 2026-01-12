@@ -207,6 +207,68 @@ def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map):
     return map_cache, filter_cache
 
 
+def check_dataset_cache_exists(
+    map_cache: Dict[str, str],
+    filter_cache: Optional[Dict[str, str]],
+    train_split_keys: list,
+    num_proc: Optional[int] = None,
+) -> bool:
+    def check_cache_files_exist(
+        cache_file_path: str,
+        num_proc: Optional[int] = None,
+    ) -> bool:
+        """
+        캐시 파일들이 모두 존재하는지 확인
+
+        Args:
+            cache_file_path: 기본 캐시 파일 경로
+            num_proc: 멀티프로세싱 worker 수
+
+        Returns:
+            모든 캐시 파일이 존재하면 True
+        """
+        # 단일 프로세스 또는 num_proc이 지정되지 않은 경우
+        if num_proc is None or num_proc <= 1:
+            return os.path.exists(cache_file_path)
+
+        # 멀티프로세싱: 모든 worker의 캐시 파일 확인
+        # datasets는 suffix 패턴을 사용: {base}_{rank:05d}_of_{num_proc:05d}.arrow
+        base_name = os.path.splitext(cache_file_path)[0]
+        for rank in range(num_proc):
+            cache_file = f"{base_name}_{rank:05d}_of_{num_proc:05d}.arrow"
+            if not os.path.exists(cache_file):
+                return False
+
+        return True
+
+    """
+    모든 데이터셋 split의 캐시가 존재하는지 확인
+
+    Args:
+        map_cache: map 캐시 파일 경로 딕셔너리
+        filter_cache: filter 캐시 파일 경로 딕셔너리
+        train_split_keys: train split 키 리스트
+        num_proc: 멀티프로세싱 worker 수
+
+    Returns:
+        모든 split의 캐시가 존재하면 True
+    """
+    # map 캐시 확인
+    for split_key, cache_path in map_cache.items():
+        if not check_cache_files_exist(cache_path, num_proc):
+            return False
+
+    # filter 캐시 확인 (train split만)
+    if filter_cache:
+        for split_key, cache_path in filter_cache.items():
+            if split_key in train_split_keys:
+                # filter는 항상 단일 파일 (num_proc 고려 필요)
+                if not check_cache_files_exist(cache_path, num_proc):
+                    return False
+
+    return True
+
+
 def range_histogram(data, num_bins=50, width=50):
     """데이터 분포를 히스토그램으로 시각화"""
     if not data:
@@ -236,7 +298,7 @@ def range_histogram(data, num_bins=50, width=50):
         logger.info(f"{start:8.0f}-{end:8.0f}: {count:6d} |{bar}")
 
     logger.info("-" * 80)
-    logger.info(f"\nStatistics:")
+    logger.info("\nStatistics:")
     logger.info(f"데이터 개수: {len(data)}, 최소값: {min_val:.0f}, 최대값: {max_val:.0f}")
     logger.info(f"평균값: {sum(data) / len(data):.2f}, 구간 크기: {bin_size:.2f}")
 
@@ -246,7 +308,9 @@ def processing_datasets(
     tokenizer: PreTrainedTokenizer,
     func: Callable,
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
-    """데이터셋 로드 및 전처리"""
+    if train_args.data_preprocessor_type not in PROCESSOR_REGISTRY:
+        raise ValueError(f"알 수 없는 데이터 프로세서 타입: {train_args.data_preprocessor_type}")
+    func = PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
 
     start_time = time.time()
     is_main = train_args.distributed_state.is_local_main_process
@@ -270,6 +334,23 @@ def processing_datasets(
         # 캐시 파일명 생성
         map_cache, filter_cache = _get_cache_dir(train_args, repo_name, data_name, datasets.keys(), truncate_map)
 
+        # 캐시 존재 여부 확인 및 main_process_first 적용
+        cache_exists = check_dataset_cache_exists(
+            map_cache=map_cache,
+            filter_cache=filter_cache,
+            train_split_keys=train_args.dataset_prefix.get("train", []),
+            num_proc=train_args.preprocessing_num_workers,
+        )
+        use_main_process_first = not cache_exists
+
+        if is_main:
+            logger.info(f"{repo_name}: cache_exists={cache_exists}, use_main_process_first={use_main_process_first}")
+
+        with (
+            train_args.main_process_first(desc=f"preprocessing-{repo_name}")
+            if use_main_process_first
+            else nullcontext()
+        ):
         # 전처리 (토크나이징 등)
         datasets = datasets.map(
             func,
@@ -299,10 +380,11 @@ def processing_datasets(
             # 길이 필터링 (train만)
             if split_key in train_args.dataset_prefix["train"] and train_args.do_train:
                 dataset = dataset.filter(
-                    lambda lengths: [l <= train_args.data_max_length for l in lengths],
+                        lambda lengths: [l <= train_args.max_length for l in lengths],
                     num_proc=train_args.preprocessing_num_workers,
                     input_columns=[train_args.length_column_name],
                     cache_file_name=filter_cache[split_key] if filter_cache else None,
+                        load_from_cache_file=True,
                     batched=True,
                     batch_size=train_args.preprocessing_batch_size,
                     desc=f"filter-{repo_name}/{split_key}",
@@ -318,7 +400,10 @@ def processing_datasets(
             for split_type, prefixes in train_args.dataset_prefix.items():
                 split_type = "predict" if split_type == "test" else split_type
                 if split_key in prefixes:
-                    do_flag = getattr(train_args, f"do_{split_type if split_type != 'valid' else 'eval'}")
+                    do_flag = getattr(
+train_args,
+f"do_{split_type if split_type != 'valid' else 'eval'}",
+)
                     if do_flag:
                         datasets_by_split[split_type].append(dataset)
 

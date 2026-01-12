@@ -1,9 +1,7 @@
 import logging
 import sys
 from collections import defaultdict
-from contextlib import nullcontext
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import datasets
@@ -84,10 +82,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         metadata={
             "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'data_config_name'}. 데이터셋 로드 시 사용된다."
         },
-    )
-    do_data_main_process_first: bool = field(
-        default=False,
-        metadata={"help": "데이터 전처리를 메인 프로세스에서 먼저 실행할지 여부를 결정하는 값."},
     )
 
     # -------------------------- Training Args ------------------------- #
@@ -236,14 +230,7 @@ def main(train_args: SFTScriptArguments) -> None:
     processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     config = AutoConfig.from_pretrained(train_args.model_name_or_path, **train_args.config_kwargs)
 
-    with (
-        train_args.main_process_first(desc="main_process_first")
-        if train_args.do_data_main_process_first
-        else nullcontext()
-    ):
-        train_dataset, valid_dataset, test_dataset = processing_datasets(
-            train_args, processor, PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
-        )
+    train_dataset, valid_dataset, test_dataset = processing_datasets(train_args, processor)
 
     # NOTE: 학습에 활용할 값들을 로딩
     model_kwargs = {"config": config, **train_args.model_init_kwargs}
