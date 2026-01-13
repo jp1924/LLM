@@ -22,7 +22,8 @@ from trl import (
 )
 
 import transformers
-from transformers import AutoConfig, AutoProcessor, set_seed
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, set_seed
+from transformers import logging as hf_logging
 from transformers.data.data_collator import DataCollatorMixin
 from transformers.trainer_pt_utils import get_model_param_count
 
@@ -47,7 +48,8 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     data_preprocessor_type: str = field(
         default_factory=lambda: PROCESSOR_REGISTRY.keys(),
         metadata={
-            "help": f"학습할 데이터의 전처리를 어떻게 할지 결정하는 값, {', '.join(PROCESSOR_REGISTRY.keys())} 를 지원한다."
+            "help": f"학습할 데이터의 전처리를 어떻게 할지 결정하는 값. {', '.join(PROCESSOR_REGISTRY.keys())} 중 하나여야 한다.",
+            "choices": PROCESSOR_REGISTRY.keys(),
         },
     )
     preprocessing_num_workers: int = field(
@@ -202,19 +204,22 @@ class PackingCollatorForLLM(DataCollatorMixin):
         if features_ls and isinstance(features_ls[0], dict):
             features_ls = [features_ls]
 
-        input_ids_ls, labels_ls, position_ids_ls, input_length_ls = [], [], [], []
+        input_ids_ls, labels_ls, position_ids_ls, input_length_ls, token_type_id_ls = [], [], [], [], []
         for features in features_ls:
             for feature in features:
+                labels = feature["labels"] if self.process_type != "pretrain" else feature["input_ids"]
                 length = len(feature["input_ids"])
                 input_ids_ls.append(feature["input_ids"])
-                labels_ls.append(feature["labels"] if self.process_type != "pretrain" else feature["input_ids"])
+                labels_ls.append(labels)
                 position_ids_ls.append(torch.arange(length))
                 input_length_ls.append(length)
+                token_type_id_ls.append(labels != -100)
 
         batch = {
             "input_ids": torch.cat(input_ids_ls)[None],
             "labels": torch.cat(labels_ls)[None],
             "position_ids": torch.cat(position_ids_ls)[None],
+            "token_type_ids": torch.cat(token_type_id_ls)[None],
         }
 
         return batch
@@ -251,11 +256,16 @@ class PackingCollatorForLLM(DataCollatorMixin):
             return self._pad_collate(features_ls)
 
 
-logger = transformers.utils.logging.get_logger("transformers")
+logger = hf_logging.get_logger("transformers")
 
 
 def main(train_args: SFTScriptArguments) -> None:
-    processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
+    # Gemma3의 경우 tokenizer의 logger가 너무 길기 때문에 suppress함
+    try:
+        processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
+    except OSError:
+        processor = AutoTokenizer.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
+
     config = AutoConfig.from_pretrained(train_args.model_name_or_path, **train_args.config_kwargs)
 
     train_dataset, valid_dataset, test_dataset = processing_datasets(train_args, processor)
@@ -286,7 +296,13 @@ def main(train_args: SFTScriptArguments) -> None:
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 
-    setattr(train_args, "packing", False)  # processing_datasets에서 이미 패킹이 적용되었기 때문에 False로 설정
+    # processing_datasets에서 이미 패킹이 적용되었기 때문에 False로 설정
+    setattr(train_args, "packing", False)
+    # 이미 초기화 했기 때문에 model_SFTTrainer에서 모델 초기화 방식을 사용하지 않도록 설정
+    setattr(train_args, "model_init_kwargs", None)
+    # 데이터셋 준비 단계를 건너뛰도록 설정
+    train_args.dataset_kwargs = {"skip_prepare_dataset": True}
+
     trainer = SFTTrainer(
         model=model,
         train_dataset=train_dataset,
@@ -358,8 +374,8 @@ if "__main__" in __name__:
     logger.setLevel(log_level)
 
     datasets.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.enable_default_handler()
-    transformers.utils.logging.enable_explicit_format()
+    hf_logging.set_verbosity(log_level)
+    hf_logging.enable_default_handler()
+    hf_logging.enable_explicit_format()
 
     main(train_args)
