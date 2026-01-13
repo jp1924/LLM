@@ -24,11 +24,13 @@ ADD https://astral.sh/uv/install.sh /uv-installer.sh
 RUN sh /uv-installer.sh && rm /uv-installer.sh
 ENV PATH="/root/.local/bin/:$PATH"
 
-RUN uv pip install -U pip wheel setuptools
-RUN uv pip install transformers accelerate datasets liger-kernel trl peft deepspeed lomo-optim transformer_engine[pytorch] evaluate \
-    bitsandbytes scipy sentencepiece pillow fastapi uvicorn ruff natsort setproctitle glances[gpu] wandb cmake latex2sympy2_extended math_verify
+RUN uv pip install -U pip wheel setuptools debugpy pydevd
+RUN uv pip install transformers accelerate datasets liger-kernel trl peft deepspeed lomo-optim apollo-torch transformer_engine[pytorch] evaluate \
+    bitsandbytes scipy sentencepiece pillow fastapi uvicorn ruff natsort setproctitle glances[gpu] wandb cmake latex2sympy2_extended math_verify pytest
 
-RUN uv pip install vllm
 RUN uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
-
 RUN uv pip install flash_attn
+
+RUN git clone -b v0.4.9.2 https://github.com/EleutherAI/lm-evaluation-harness.git && \
+    cd lm-evaluation-harness && \
+    uv pip install -e . 
