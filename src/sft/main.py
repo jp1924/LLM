@@ -114,6 +114,8 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     )
 
     def __post_init__(self) -> None:
+        SFTConfig.__post_init__(self)
+        ModelConfig.__post_init__(self)
         # train_args 조정 및 필요한 값들 설정
         self.config_kwargs = {
             **self.config_kwargs,
@@ -142,9 +144,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
 
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
-
-        SFTConfig.__post_init__(self)
-        ModelConfig.__post_init__(self)
 
 
 class PackingCollatorForLLM(DataCollatorMixin):
