@@ -143,13 +143,13 @@ class EvalHarnessCallBack(TrainerCallback):
         **kwargs,
     ):
         if state.global_step == 0 and self.do_init_eval:
-            self.log_likelihood_evaluate(args, state, control, **kwargs)
+            self.log_likelihood_evaluate(**kwargs)
         if (
             state.global_step % self.eval_steps == 0
             and state.global_step != 0
             and state.global_step >= self.eval_start
         ):
-            self.log_likelihood_evaluate(args, state, control, **kwargs)
+            self.log_likelihood_evaluate(**kwargs)
 
     def log_likelihood_evaluate(
         self, limit: Optional[Union[int, float]] = None, samples: Optional[dict] = None, **kwargs
@@ -159,7 +159,7 @@ class EvalHarnessCallBack(TrainerCallback):
 
         lm = CustomHFLM(
             pretrained=self.trainer.model,
-            tokenizer=self.tokenizer,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
             batch_size=self.eval_batch_size,
             max_batch_size=128,
         )
