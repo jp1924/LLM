@@ -349,8 +349,7 @@ class EvalHarnessCallBack(TrainerCallback):
         lm = CustomHFLM(
             pretrained=model,
             tokenizer=getattr(processing_class, "tokenizer", processing_class),
-            # batch_size=self.eval_batch_size,
-            batch_size=1,
+            batch_size=self.eval_batch_size,
         )
         outputs = lm_eval.evaluate(lm=lm, task_dict=self.task_dict, limit=limit, samples=samples)
         model.train()
