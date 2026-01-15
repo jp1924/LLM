@@ -4,10 +4,20 @@ downcast_bf16: 'no'
 enable_cpu_affinity: false
 main_training_function: main
 num_machines: 1
-num_processes: 4
+num_processes: 2
 same_network: false
 tpu_env: []
 tpu_use_cluster: false
 tpu_use_sudo: false
 mixed_precision: bf16
 distributed_type: FSDP
+fsdp_config:
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_backward_prefetch_policy: BACKWARD_PRE
+  fsdp_forward_prefetch: false
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_offload_params: false
+  fsdp_sharding_strategy: FULL_SHARD
+  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_sync_module_states: true
+  fsdp_use_orig_params: true
