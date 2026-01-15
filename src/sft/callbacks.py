@@ -1,21 +1,18 @@
-from typing import List, Literal, Optional, Union
+from collections import defaultdict
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import lm_eval
 import torch
+import torch.distributed as dist
 from accelerate import Accelerator
 from lm_eval.api.model import TemplateLM
 from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils import configure_pad_token, get_dtype
 from lm_eval.tasks import TaskManager, get_task_dict
+from torch.distributed.fsdp import FullyShardedDataParallel
 
 import transformers
-from transformers import (
-    Trainer,
-    TrainerCallback,
-    TrainerControl,
-    TrainerState,
-    TrainingArguments,
-)
+from transformers import Trainer, TrainerCallback
 
 
 logger = transformers.utils.logging.get_logger("transformers")
@@ -72,9 +69,8 @@ class CustomHFLM(HFLM):
             add_bos_token=add_bos_token,
         )
 
-        # access self._model through self.model property outside this method
-        if isinstance(self.model, torch.nn.Module):
-            self.model.eval()
+        self.model.eval()
+        if not isinstance(self.model, FullyShardedDataParallel):
             self.model.tie_weights()
 
         self.truncation = truncation
@@ -105,7 +101,6 @@ class CustomHFLM(HFLM):
         if prefix_token_id is not None:
             logger.info(f"Loglikelihood prefix token id used in evaluation: {self.prefix_token_id}")
 
-        #
         self.delta = None
         self.peft = None
         self.softmax_dtype = None
@@ -113,6 +108,192 @@ class CustomHFLM(HFLM):
 
     def _model_generate(self, *args, **kwargs):
         raise NotImplementedError("_model_generate is not implemented for CustomHFLM")
+
+    @property
+    def model(self):
+        # returns the model, unwrapping it if using Accelerate
+        if hasattr(self, "accelerator") and False:
+            return self.accelerator.unwrap_model(self._model)
+        else:
+            return self._model
+
+    def _loglikelihood_tokens(
+        self,
+        requests: List[Tuple[Tuple[str, str], List[int], List[int]]],
+        disable_tqdm: bool = False,
+        override_bs: Optional[int] = None,
+    ) -> List[Tuple[float, bool]]:
+        """
+        Multi-GPU 동기화를 위한 패딩 추가/제거 로직이 포함된 _loglikelihood_tokens
+        """
+        padding_indices = []  # 패딩 인덱스 추적
+
+        # Multi-GPU 환경이고 context caching이 활성화된 경우에만 패딩 적용
+        if self._world_size > 1 and self.backend == "causal" and self.logits_cache:
+            # 패딩 추가 (패딩 인덱스도 함께 반환)
+            requests, num_padding_added, padding_indices = self._add_sync_padding(requests)
+        else:
+            num_padding_added = 0
+
+        results = super()._loglikelihood_tokens(requests, disable_tqdm=disable_tqdm, override_bs=override_bs)
+
+        # 패딩 인덱스에 해당하는 결과만 제거
+        if num_padding_added > 0:
+            # 패딩이 아닌 결과만 선택
+            padding_set = set(padding_indices)
+            results = [res for idx, res in enumerate(results) if idx not in padding_set]
+
+        return results
+
+    def _add_sync_padding(
+        self, requests: List[Tuple[Tuple[str, str], List[int], List[int]]]
+    ) -> Tuple[List[Tuple[Tuple[str, str], List[int], List[int]]], int, List[int]]:
+        """
+        Multi-GPU 동기화를 위한 패딩 추가
+
+        Returns:
+            (padded_requests, num_padding_added, padding_indices)
+        """
+        local_num_groups = self._count_unique_context_groups(requests)
+        global_max_groups = self._sync_max_groups(local_num_groups)
+        num_padding_needed = global_max_groups - local_num_groups
+
+        padding_indices = []  # 패딩이 추가된 위치 추적
+
+        if num_padding_needed > 0:
+            # 패딩 시작 인덱스
+            start_idx = len(requests)
+            padded_requests = self._append_dummy_requests(requests, num_padding_needed)
+            # 패딩 인덱스 기록
+            padding_indices = list(range(start_idx, start_idx + num_padding_needed))
+        else:
+            padded_requests = requests
+
+        if dist.is_initialized():
+            dist.barrier()
+
+        return padded_requests, num_padding_needed, padding_indices
+
+    def _count_unique_context_groups(self, requests: List[Tuple[Tuple[str, str], List[int], List[int]]]) -> int:
+        """
+        Collator의 context grouping 로직을 시뮬레이션하여 unique 그룹 수 계산
+
+        이 메서드는 Collator가 내부적으로 수행하는 그룹핑을 미리 계산합니다:
+        - group_fn = _lookup_one_token_cont
+        - key = context_enc + continuation_enc[:-1]
+        """
+        context_groups: Dict[tuple, list] = defaultdict(list)
+
+        for req in requests:
+            # req 구조: ((str, str), context_enc, continuation_enc)
+            _, context_enc, continuation_enc = req
+
+            # _lookup_one_token_cont와 동일한 키 생성
+            # context + continuation[:-1]을 키로 사용
+            grouping_key = tuple(context_enc + continuation_enc[:-1])
+
+            context_groups[grouping_key].append(req)
+
+        # Collator. get_batched()는 각 그룹에서 1개씩만 선택
+        # 따라서 그룹 수 = 실제 처리될 요청 수
+        num_unique_groups = len(context_groups)
+
+        return num_unique_groups
+
+    def _sync_max_groups(self, local_value: int) -> int:
+        """
+        모든 GPU에서 최대 그룹 수를 찾아 동기화
+
+        Args:
+            local_value: 현재 GPU의 unique 그룹 수
+
+        Returns:
+            모든 GPU 중 최대 그룹 수
+        """
+        if not dist.is_initialized() or self._world_size == 1:
+            return local_value
+
+        # Tensor로 변환 (GPU 메모리에 올림)
+        local_tensor = torch.tensor([local_value], dtype=torch.long, device=self._device)
+
+        # All-Reduce with MAX operation
+        dist.all_reduce(local_tensor, op=dist.ReduceOp.MAX)
+
+        max_groups = local_tensor.item()
+
+        if self._rank == 0:
+            logger.debug(f"[Rank {self._rank}] Local groups: {local_value}, Global max groups: {max_groups}")
+
+        return max_groups
+
+    def _append_dummy_requests(
+        self, requests: List[Tuple[Tuple[str, str], List[int], List[int]]], num_padding: int
+    ) -> List[Tuple[Tuple[str, str], List[int], List[int]]]:
+        """
+        Dummy 패딩 요청 추가
+
+        전략:
+        1. 가장 짧은 요청을 기반으로 패딩 생성 (계산 비용 최소화)
+        2. 각 패딩에 고유한 context를 부여 (중복 그룹핑 방지)
+        3. 식별 가능한 마커 추가 (디버깅 용이)
+
+        Args:
+            requests: 원본 요청 리스트
+            num_padding: 추가할 패딩 개수
+
+        Returns:
+            패딩이 추가된 요청 리스트
+        """
+        if num_padding == 0:
+            return requests
+
+        # 패딩용 토큰 ID 가져오기
+        pad_token_id = self._get_safe_padding_token_id()
+
+        # 패딩 요청 생성
+        padded_requests = requests.copy()
+
+        for i in range(num_padding):
+            # 고유한 context 생성 (각 rank와 index에 따라 다름)
+            # 이렇게 하면 서로 다른 그룹으로 인식됨
+            unique_context = [
+                pad_token_id,  # 기본 패딩 토큰
+                (self._rank * 10000 + i) % self.vocab_size,  # rank별 고유 ID
+            ]
+
+            # 단일 토큰 continuation (최소 비용)
+            unique_continuation = [pad_token_id]
+
+            # 식별 가능한 마커 (디버깅용)
+            dummy_request = (
+                (f"__PADDING_RANK{self._rank}_IDX{i}__", ""),  # str tuple
+                unique_context,  # context_enc
+                unique_continuation,  # continuation_enc
+            )
+
+            padded_requests.append(dummy_request)
+
+        return padded_requests
+
+    def _get_safe_padding_token_id(self) -> int:
+        """
+        안전한 패딩 토큰 ID 반환
+
+        우선순위:
+        1. tokenizer. pad_token_id
+        2. tokenizer.eos_token_id
+        3. tokenizer. unk_token_id
+        4. 0 (fallback)
+        """
+        if self.tokenizer.pad_token_id is not None:
+            return self.tokenizer.pad_token_id
+        elif self.tokenizer.eos_token_id is not None:
+            return self.tokenizer.eos_token_id
+        elif self.tokenizer.unk_token_id is not None:
+            return self.tokenizer.unk_token_id
+        else:
+            logger.warning(f"[Rank {self._rank}] No valid padding token found. Using 0 as fallback.")
+            return 0
 
 
 class EvalHarnessCallBack(TrainerCallback):
@@ -137,43 +318,45 @@ class EvalHarnessCallBack(TrainerCallback):
 
     def on_step_begin(
         self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
+        args,
+        state,
+        control,
+        model,
+        processing_class,
         **kwargs,
     ):
         if state.global_step == 0 and self.do_init_eval:
-            self.log_likelihood_evaluate(**kwargs)
+            self.log_likelihood_evaluate(model=model, processing_class=processing_class, **kwargs)
         if (
             state.global_step % self.eval_steps == 0
             and state.global_step != 0
             and state.global_step >= self.eval_start
         ):
-            self.log_likelihood_evaluate(**kwargs)
+            self.log_likelihood_evaluate(model=model, processing_class=processing_class, **kwargs)
 
+    @torch.no_grad()
     def log_likelihood_evaluate(
-        self, limit: Optional[Union[int, float]] = None, samples: Optional[dict] = None, **kwargs
+        self,
+        model,
+        processing_class,
+        limit: Optional[Union[int, float]] = None,
+        samples: Optional[dict] = None,
+        **kwargs,
     ) -> dict:
         if limit is not None and samples is not None:
             raise ValueError("Either 'limit' or 'samples' must be None, but both are not None.")
 
         lm = CustomHFLM(
-            pretrained=self.trainer.model,
-            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
-            batch_size=self.eval_batch_size,
-            max_batch_size=128,
+            pretrained=model,
+            tokenizer=getattr(processing_class, "tokenizer", processing_class),
+            # batch_size=self.eval_batch_size,
+            batch_size=1,
         )
-
         outputs = lm_eval.evaluate(lm=lm, task_dict=self.task_dict, limit=limit, samples=samples)
-        self.trainer.model.train()
-        # huggingface trainer의 log를 불러와 logging을 진행
+        model.train()
 
-        final_map = {}
-        for k, v in outputs["results"].items():
-            if "kmmlu" == k:
-                name = "kmmlu/total"
-            else:
-                name = k.replace("kmmlu_", "kmmlu/")
-
-            final_map[name] = v["acc,none"]
-        self.trainer.log(final_map)
+        if outputs:
+            final_map = {}
+            for k, v in outputs["results"].items():
+                final_map[f"lm_eval/{k}"] = v["acc,none"]
+            self.trainer.log(final_map)
