@@ -218,7 +218,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
             "input_ids": torch.cat(input_ids_ls)[None],
             "labels": torch.cat(labels_ls)[None],
             "position_ids": torch.cat(position_ids_ls)[None],
-            "token_type_ids": torch.cat(token_type_id_ls)[None],
+            # "token_type_ids": torch.cat(token_type_id_ls)[None],
         }
 
         return batch
@@ -321,6 +321,7 @@ def main(train_args: SFTScriptArguments) -> None:
                 train_args.eval_harness_tasks,
                 eval_steps=train_args.eval_steps,
                 do_init_eval=train_args.do_init_eval,
+                eval_batch_size=train_args.eval_batch_size,
             )
         )
 
