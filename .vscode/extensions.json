@@ -13,5 +13,8 @@
         "rogalmic.bash-debug",
         "charliermarsh.ruff",
         "cweijan.vscode-office",
+        "GitHub.copilot",
+        "GitHub.copilot-chat",
+        "anthropic.claude-code",
     ],
 }
