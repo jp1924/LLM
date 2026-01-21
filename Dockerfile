@@ -3,6 +3,8 @@ FROM nvcr.io/nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04
 WORKDIR /root
 USER root
 
+RUN mkdir -p /tmp && chmod 1777 /tmp
+
 ENV PATH="/usr/local/cuda/bin:$PATH"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
 ENV UV_SYSTEM_PYTHON="1"
@@ -14,7 +16,7 @@ RUN apt-get update && \
     apt-get install -y python3.10 python3.10-dev python3.10-venv python3-pip
 
 RUN ln -s /usr/bin/python3.10 /usr/bin/python
-COPY .tmux.conf /root/.tmux.conf
+COPY ./.tmux.conf /root/.tmux.conf
 
 RUN echo 'alias tmux="tmux -f ~/workspace/.tmux.conf"' >> /root/.bashrc
 RUN echo 'PROMPT_COMMAND='history -a'' >> /root/.bashrc
@@ -29,7 +31,7 @@ RUN uv pip install transformers accelerate datasets liger-kernel trl peft deepsp
     bitsandbytes scipy sentencepiece pillow fastapi uvicorn ruff natsort setproctitle glances[gpu] wandb cmake latex2sympy2_extended math_verify pytest
 
 RUN uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
-RUN uv pip install flash_attn
+RUN uv pip install flash_attn --no-build-isolation
 
 RUN git clone -b v0.4.9.2 https://github.com/EleutherAI/lm-evaluation-harness.git && \
     cd lm-evaluation-harness && \
