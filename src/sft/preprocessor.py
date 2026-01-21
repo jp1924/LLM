@@ -130,7 +130,7 @@ def sft_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
 
         images = row_dataset.get("images", None)
         for chat_turn in row_dataset["conversations"]:
-            content = json.loads(chat_turn["text"]) if images else chat_turn["text"].strip()
+            content = json.loads(chat_turn["content"]) if images else chat_turn["content"].strip()
             chat_turn["content"] = content
 
         labels, outputs = create_assistant_labels(tokenizer, row_dataset["conversations"], images=images)
