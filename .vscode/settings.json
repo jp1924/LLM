@@ -48,4 +48,6 @@
             "file": "/root/workspace/.vscode/commit_convention.md"
         }
     ],
+    // shell 닫아도 session 유지하는 것 때문에 변경사항 적용안되던거 해결함.
+    "terminal.integrated.enablePersistentSessions": false
 }
