@@ -16,5 +16,6 @@
         "GitHub.copilot",
         "GitHub.copilot-chat",
         "anthropic.claude-code",
+        "alefragnani.project-manager",
     ],
 }
