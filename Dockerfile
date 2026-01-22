@@ -11,6 +11,8 @@ ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
 ENV UV_SYSTEM_PYTHON="1"
 COPY ./.tmux.conf /root/.tmux.conf
 COPY ./.bashrc /root/.bashrc
+COPY ./.viminfo /root/.viminfo
+COPY ./.vimrc /root/.vimrc
 
 # 서버 관련 유틸
 RUN apt-get update && \
