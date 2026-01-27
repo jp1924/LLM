@@ -199,7 +199,8 @@ class PackingCollatorForLLM(DataCollatorMixin):
         self.tokenizer = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
         self.dtype = hasattr(self.model, "dtype")
         self.use_packing = self.args.packing
-
+        self.pad_token_id = self.tokenizer.pad_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
         self.process_type = args.data_preprocessor_type
 
         if sample_dataset is not None and self.args.distributed_state.is_local_main_process:
@@ -222,8 +223,6 @@ class PackingCollatorForLLM(DataCollatorMixin):
             if self.model.config._attn_implementation == "eager" and self.use_packing:
                 msg = "attention implementation이 eager인데, packing을 사용하고 있다. flash attention으로 변경해라."
                 raise ValueError(msg)
-        self.pad_token_id = self.tokenizer.pad_token_id
-        self.eos_token_id = self.tokenizer.eos_token_id
 
     def _create_attention_mask(self, input_length_ls):
         total_length = sum(input_length_ls)
