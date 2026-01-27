@@ -5,3 +5,4 @@ __pycache__
 .python_history
 others
 logs
+wandb
