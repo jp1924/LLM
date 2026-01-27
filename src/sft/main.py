@@ -389,6 +389,7 @@ def main(train_args: SFTScriptArguments) -> None:
         )
     if train_args.sp_enabled and (train_args.do_eval and valid_dataset):
         from callbacks import SPEvalCallBack
+        # trainer에서 _deepspeed_sp_compute_loss를 계산하는 조건문에 self.model.training를 추가해야 eval시 정상 동작 함.
 
         trainer.add_callback(SPEvalCallBack())
 
@@ -446,3 +447,5 @@ if "__main__" in __name__:
     hf_logging.enable_explicit_format()
 
     main(train_args)
+
+# from transformers import AutoModelForCausalLM
