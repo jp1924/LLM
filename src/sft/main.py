@@ -323,7 +323,6 @@ logger = hf_logging.get_logger("transformers")
 
 
 def main(train_args: SFTScriptArguments) -> None:
-    # Gemma3의 경우 tokenizer의 logger가 너무 길기 때문에 suppress함
     try:
         processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     except OSError:
@@ -388,6 +387,10 @@ def main(train_args: SFTScriptArguments) -> None:
                 eval_batch_size=train_args.eval_batch_size,
             )
         )
+    if train_args.sp_enabled and (train_args.do_eval and valid_dataset):
+        from callbacks import SPEvalCallBack
+
+        trainer.add_callback(SPEvalCallBack())
 
     if train_args.do_train and train_dataset:
         train(trainer, train_args)

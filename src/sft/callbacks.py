@@ -1,18 +1,21 @@
 from collections import defaultdict
+from copy import deepcopy
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import lm_eval
 import torch
 import torch.distributed as dist
 from accelerate import Accelerator
+from accelerate.utils.memory import release_memory
 from lm_eval.api.model import TemplateLM
 from lm_eval.models.huggingface import HFLM
-from lm_eval.models.utils import configure_pad_token, get_dtype
+from lm_eval.models.utils import configure_pad_token
 from lm_eval.tasks import TaskManager, get_task_dict
 from torch.distributed.fsdp import FullyShardedDataParallel
 
 import transformers
-from transformers import Trainer, TrainerCallback
+from transformers import Trainer, TrainerCallback, TrainerControl
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 
 logger = transformers.utils.logging.get_logger("transformers")
@@ -87,8 +90,10 @@ class CustomHFLM(HFLM):
         self.batch_schedule = 1
         self.batch_sizes = {}
         self.max_batch_size = max_batch_size
-        self.softmax_dtype = get_dtype(softmax_dtype) if softmax_dtype is not None else None
-        self.mixed_precision_dtype = get_dtype(mixed_precision_dtype) if mixed_precision_dtype is not None else None
+        self.softmax_dtype = getattr(torch, softmax_dtype) if softmax_dtype is not None else None
+        self.mixed_precision_dtype = (
+            getattr(torch, mixed_precision_dtype) if mixed_precision_dtype is not None else None
+        )
 
         if str(batch_size).startswith("auto"):
             batch_size = batch_size.split(":")
@@ -346,6 +351,9 @@ class EvalHarnessCallBack(TrainerCallback):
         if limit is not None and samples is not None:
             raise ValueError("Either 'limit' or 'samples' must be None, but both are not None.")
 
+        _local_mapping = deepcopy(ALL_ATTENTION_FUNCTIONS._local_mapping)
+        ALL_ATTENTION_FUNCTIONS._local_mapping = ALL_ATTENTION_FUNCTIONS._global_mapping
+
         lm = CustomHFLM(
             pretrained=model,
             tokenizer=getattr(processing_class, "tokenizer", processing_class),
@@ -354,8 +362,28 @@ class EvalHarnessCallBack(TrainerCallback):
         outputs = lm_eval.evaluate(lm=lm, task_dict=self.task_dict, limit=limit, samples=samples)
         model.train()
 
+        ALL_ATTENTION_FUNCTIONS._local_mapping = _local_mapping
+
         if outputs:
             final_map = {}
             for k, v in outputs["results"].items():
                 final_map[f"lm_eval/{k}"] = v["acc,none"]
             self.trainer.log(final_map)
+
+        lm = release_memory(lm)
+        outputs = release_memory(outputs)
+
+
+class SPEvalCallBack(TrainerCallback):
+    _local_mapping = None
+    # sequence parallelism 중 eval 시 attention function이 sp라 error가 발생하기 때문에, 이를 방지하기 위한 콜백
+
+    def on_step_begin(self, args, state, control: TrainerControl, **kwargs) -> None:
+        if self._local_mapping:
+            ALL_ATTENTION_FUNCTIONS._local_mapping = self._local_mapping
+            self._local_mapping = None
+
+    def on_step_end(self, args, state, control: TrainerControl, **kwargs) -> None:
+        if control.should_evaluate:
+            self._local_mapping = deepcopy(ALL_ATTENTION_FUNCTIONS._local_mapping)
+            ALL_ATTENTION_FUNCTIONS._local_mapping = ALL_ATTENTION_FUNCTIONS._global_mapping
