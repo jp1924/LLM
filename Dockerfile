@@ -33,7 +33,5 @@ RUN uv pip install transformers accelerate datasets liger-kernel trl peft deepsp
 
 RUN uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 RUN uv pip install flash_attn --no-build-isolation
-
-RUN git clone -b v0.4.9.2 https://github.com/EleutherAI/lm-evaluation-harness.git && \
-    cd lm-evaluation-harness && \
-    uv pip install -e . 
+RUN uv pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@cab12a47fbc159334f9cb53ca046b7d65e8b43e0
+    
