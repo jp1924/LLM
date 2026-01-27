@@ -25,6 +25,7 @@ import transformers
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, set_seed
 from transformers import logging as hf_logging
 from transformers.data.data_collator import DataCollatorMixin
+from transformers.feature_extraction_utils import BatchFeature
 from transformers.trainer_pt_utils import get_model_param_count
 
 
@@ -248,11 +249,13 @@ class PackingCollatorForLLM(DataCollatorMixin):
         }
         return batch
 
-    def torch_call(self, features_ls: Union[List[dict], List[List[dict]]]) -> dict:
+    def torch_call(self, features_ls: Union[List[dict], List[List[dict]]]) -> BatchFeature:
         if self.use_packing and (self.args.eval_packing or self.model.training):
-            return self._pack_collate(features_ls)
+            batch = self._pack_collate(features_ls)
         else:
-            return self._pad_collate(features_ls)
+            batch = self._pad_collate(features_ls)
+
+        return BatchFeature(batch, self.return_tensors)
 
 
 logger = hf_logging.get_logger("transformers")
