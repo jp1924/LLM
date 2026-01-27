@@ -2,12 +2,12 @@ import logging
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import datasets
 import optimization
 import torch
-import torch.nn as nn
+from accelerate import DataLoaderConfiguration, ParallelismConfig
 from datasets import Dataset
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
 from setproctitle import setproctitle
@@ -146,13 +146,35 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         if self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
+        # SP(Sequence Parallelism) 활성화 시 batch_size에 맞게 max_length 조정
+        self.parallelism_config = ParallelismConfig()
+        self.dataloader_configuration = DataLoaderConfiguration()
+
+        if self.parallelism_config.sp_enabled:
+            if self.max_length % self.world_size != 0:
+                raise ValueError(
+                    f"SP(Sequence Parallelism) 활성화 시 max_length가 world_size({self.world_size})의 배수가 되어야 합니다. "
+                    f"현재 max_length: {self.max_length}"
+                )
+
+            self.max_length *= self.per_device_train_batch_size
+            self.per_device_train_batch_size = 1
+            logger.debug(
+                "SP(Sequence Parallelism) 활성화 시 max_length를 batch_size 수 만큼 곱합니다. "
+                f"max_length: {self.max_length}, per_device_train_batch_size: {self.per_device_train_batch_size}"
+            )
+
+    @property
+    def sp_enabled(self) -> bool:
+        return self.parallelism_config.sp_enabled
+
 
 class PackingCollatorForLLM(DataCollatorMixin):
     def __init__(
         self,
         args: SFTScriptArguments,
-        model: nn.Module,
-        tokenizer: Union[AutoProcessor, transformers.PreTrainedTokenizer],
+        model: "nn.Module",
+        tokenizer: Union[AutoProcessor, AutoTokenizer],
         return_tensors: Optional[str] = "pt",
         sample_dataset: Optional[Dataset] = None,
     ) -> None:
@@ -162,7 +184,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
                 현재 학습 상태 및 설정을 확인하기 위한 값
             model (`nn.Module`):
                 현재 학습 중인지 아닌지 확인하기 위한 값
-            processor (`ProcessorMixin` or `PreTrainedTokenizer`):
+            tokenizer (`AutoProcessor` or `AutoTokenizer`):
                 입력받은 데이터를 pad처리 하거나, 추가적인 전처리를 진행하기 위해 사용하는 프로세서
             return_tensors (`str`, *optional*, defaults to `"pt"`):
                 입력받은 값은 pt, tf, np 중 하나로 변환. 기본값은 "pt"입니다.
@@ -175,6 +197,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
         self.model = model
         self.return_tensors = return_tensors
         self.tokenizer = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+        self.dtype = hasattr(self.model, "dtype")
         self.use_packing = self.args.packing
 
         self.process_type = args.data_preprocessor_type
@@ -186,10 +209,10 @@ class PackingCollatorForLLM(DataCollatorMixin):
             input_ids, labels = sample_check["input_ids"].tolist()[0], sample_check["labels"]
             labels = labels[labels != -100].tolist()
 
-            str_labels = [self.tokenizer.convert_ids_to_tokens(token).replace("\n", "/n") for token in labels]
-            str_input_ids = [self.tokenizer.convert_ids_to_tokens(token).replace("\n", "/n") for token in input_ids]
+            # str_labels = [self.tokenizer.convert_ids_to_tokens(token).replace("\n", "/n") for token in labels]
+            # str_input_ids = [self.tokenizer.convert_ids_to_tokens(token).replace("\n", "/n") for token in input_ids]
 
-            logger.info(f"\nlabel-values: [{', '.join(str_labels)}]\ninput-values: [{', '.join(str_input_ids)}]\n")
+            # logger.info(f"\nlabel-values: [{', '.join(str_labels)}]\ninput-values: [{', '.join(str_input_ids)}]\n")
 
             if self.tokenizer.bos_token_id and self.tokenizer.bos_token_id not in input_ids:
                 raise ValueError("BOS 토큰이 데이터에서 검출되지 않는다. 전처리가 다시 필요하다.")
@@ -199,8 +222,24 @@ class PackingCollatorForLLM(DataCollatorMixin):
             if self.model.config._attn_implementation == "eager" and self.use_packing:
                 msg = "attention implementation이 eager인데, packing을 사용하고 있다. flash attention으로 변경해라."
                 raise ValueError(msg)
+        self.pad_token_id = self.tokenizer.pad_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
 
-    def _pack_collate(self, features_ls: List[List[dict]]) -> dict:
+    def _create_attention_mask(self, input_length_ls):
+        total_length = sum(input_length_ls)
+        attention_mask = torch.full((1, total_length, total_length), torch.finfo(self.dtype).min)
+
+        start_idx, end_idx = 0, 0
+        for length in input_length_ls:
+            end_idx += length
+            one_tensor = torch.ones((length, length), dtype=torch.float32)
+            mask = torch.tril(one_tensor, diagonal=0).to(dtype=torch.bool)
+            attention_mask[0, start_idx:end_idx, start_idx:end_idx][mask] = 0
+            start_idx = end_idx
+
+        return attention_mask
+
+    def _pack_collate(self, features_ls: List[dict]) -> dict:
         if features_ls and isinstance(features_ls[0], dict):
             features_ls = [features_ls]
 
@@ -215,37 +254,59 @@ class PackingCollatorForLLM(DataCollatorMixin):
                 input_length_ls.append(length)
                 token_type_id_ls.append(labels != -100)
 
+        # attention_mask = None
+        # if self.args.attn_implementation == "sdpa":
+        #     attention_mask = self._create_attention_mask(input_length_ls)
+
+        input_ids = torch.cat(input_ids_ls)
+        labels = torch.cat(labels_ls)
+        position_ids = torch.cat(position_ids_ls)
+        token_type_ids = torch.cat(token_type_id_ls)
+
+        if self.args.sp_enabled and input_ids.shape[0] % self.args.world_size != 0:
+            # self.args.sp_enabled이 True인 경우, input_ids의 길이가 world_size의 배수가 되어야 한다.
+            pad_length = self.args.world_size - (input_ids.shape[0] % self.args.world_size)
+            input_ids = torch.nn.functional.pad(input_ids, (0, pad_length), value=self.pad_token_id)
+            labels = torch.nn.functional.pad(labels, (0, pad_length), value=-100)
+            position_ids = torch.nn.functional.pad(position_ids, (0, pad_length), value=0)
+            token_type_ids = torch.nn.functional.pad(token_type_ids, (0, pad_length), value=0)
+
         batch = {
-            "input_ids": torch.cat(input_ids_ls)[None],
-            "labels": torch.cat(labels_ls)[None],
-            "position_ids": torch.cat(position_ids_ls)[None],
-            # "token_type_ids": torch.cat(token_type_id_ls)[None],
+            "input_ids": input_ids[None],
+            "labels": labels[None],
+            "position_ids": position_ids[None],
+            "token_type_ids": token_type_ids[None],
         }
 
         return batch
 
-    def _pad_collate(self, features_ls: Union[List[dict], List[List[Dict]]]) -> dict:
-        def flatten(features_ls):
-            return [
-                feature
-                for features in features_ls
-                for feature in (features if isinstance(features, list) else [features])
-            ]
-
-        feature_ls = flatten(features_ls)
-        input_ids_features = [{"input_ids": feature["input_ids"]} for feature in feature_ls]
+    def _pad_collate(self, features_ls: List[dict]) -> dict:
+        input_ids_features = [{"input_ids": feature["input_ids"]} for feature in features_ls]
         labels_features = [
             {"input_ids": feature["labels"] if self.process_type != "pretrain" else feature["input_ids"]}
-            for feature in feature_ls
+            for feature in features_ls
         ]
-
         input_output = self.tokenizer.pad(input_ids_features, padding_side="left", return_tensors="pt")
         labels_output = self.tokenizer.pad(labels_features, padding_side="left", return_tensors="pt")
+        input_ids, labels, attention_mask = (
+            input_output.input_ids,
+            labels_output.input_ids,
+            input_output.attention_mask,
+        )
+        labels[labels == self.pad_token_id] = -100
+
+        if self.args.sp_enabled and input_ids.shape[0] % self.args.world_size != 0:
+            # self.args.sp_enabled이 True인 경우, input_ids의 길이가 world_size의 배수가 되어야 한다.
+            pad_length = self.args.world_size - (input_ids.shape[0] % self.args.world_size)
+            input_ids = torch.nn.functional.pad(input_ids, (0, pad_length), value=self.pad_token_id)
+            attention_mask = torch.nn.functional.pad(attention_mask, (0, pad_length), value=0)
+            labels = torch.nn.functional.pad(labels, (0, pad_length), value=-100)
 
         batch = {
-            "input_ids": input_output.input_ids,
-            "labels": labels_output.input_ids,
-            "attention_mask": input_output.attention_mask,
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+            "token_type_ids": attention_mask,
         }
         return batch
 
