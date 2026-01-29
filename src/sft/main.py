@@ -294,9 +294,9 @@ class PackingCollatorForLLM(DataCollatorMixin):
         )
         labels[labels == self.pad_token_id] = -100
 
-        if self.args.sp_enabled and input_ids.shape[0] % self.args.world_size != 0:
+        if self.args.sp_enabled and input_ids.shape[1] % self.args.world_size != 0:
             # self.args.sp_enabled이 True인 경우, input_ids의 길이가 world_size의 배수가 되어야 한다.
-            pad_length = self.args.world_size - (input_ids.shape[0] % self.args.world_size)
+            pad_length = self.args.world_size - (input_ids.shape[1] % self.args.world_size)
             input_ids = torch.nn.functional.pad(input_ids, (0, pad_length), value=self.pad_token_id)
             attention_mask = torch.nn.functional.pad(attention_mask, (0, pad_length), value=0)
             labels = torch.nn.functional.pad(labels, (0, pad_length), value=-100)
