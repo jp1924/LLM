@@ -48,8 +48,7 @@ class CustomHFLM(HFLM):
     ) -> None:
         TemplateLM.__init__(self)
 
-        accelerator = Accelerator()
-        self.accelerator = accelerator
+        self.accelerator = Accelerator()
 
         self._device = self.accelerator.device
         self._model = pretrained
@@ -367,23 +366,8 @@ class EvalHarnessCallBack(TrainerCallback):
         if outputs:
             final_map = {}
             for k, v in outputs["results"].items():
-                final_map[f"lm_eval/{k}"] = v["acc,none"]
+                final_map[f"test_{k}"] = v["acc,none"]
             self.trainer.log(final_map)
 
         lm = release_memory(lm)
         outputs = release_memory(outputs)
-
-
-class SPEvalCallBack(TrainerCallback):
-    _local_mapping = None
-    # sequence parallelism 중 eval 시 attention function이 sp라 error가 발생하기 때문에, 이를 방지하기 위한 콜백
-
-    def on_step_begin(self, args, state, control: TrainerControl, **kwargs) -> None:
-        if self._local_mapping:
-            ALL_ATTENTION_FUNCTIONS._local_mapping = self._local_mapping
-            self._local_mapping = None
-
-    def on_step_end(self, args, state, control: TrainerControl, **kwargs) -> None:
-        if control.should_evaluate:
-            self._local_mapping = deepcopy(ALL_ATTENTION_FUNCTIONS._local_mapping)
-            ALL_ATTENTION_FUNCTIONS._local_mapping = ALL_ATTENTION_FUNCTIONS._global_mapping
