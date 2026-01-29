@@ -204,16 +204,10 @@ class PackingCollatorForLLM(DataCollatorMixin):
         self.process_type = args.data_preprocessor_type
 
         if sample_dataset is not None and self.args.distributed_state.is_local_main_process:
-            sample = sample_dataset[0]
-            sample_check = self([sample])
+            sample_check = self([sample_dataset[0], sample_dataset[1]])
 
             input_ids, labels = sample_check["input_ids"].tolist()[0], sample_check["labels"]
             labels = labels[labels != -100].tolist()
-
-            # str_labels = [self.tokenizer.convert_ids_to_tokens(token).replace("\n", "/n") for token in labels]
-            # str_input_ids = [self.tokenizer.convert_ids_to_tokens(token).replace("\n", "/n") for token in input_ids]
-
-            # logger.info(f"\nlabel-values: [{', '.join(str_labels)}]\ninput-values: [{', '.join(str_input_ids)}]\n")
 
             if self.tokenizer.bos_token_id and self.tokenizer.bos_token_id not in input_ids:
                 raise ValueError("BOS 토큰이 데이터에서 검출되지 않는다. 전처리가 다시 필요하다.")
