@@ -105,14 +105,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         default=None,
         metadata={"help": "평가에 활용할 lm-eval-harness의 태스크 리스트."},
     )
-    eval_steps: int = field(
-        default=1000,
-        metadata={"help": "몇 스텝마다 eval을 수행할지 결정하는 값."},
-    )
-    do_init_eval: bool = field(
-        default=False,
-        metadata={"help": "학습 시작 전에 eval을 수행할지 결정하는 값."},
-    )
 
     def __post_init__(self) -> None:
         SFTConfig.__post_init__(self)
@@ -376,7 +368,7 @@ def main(train_args: SFTScriptArguments) -> None:
                 processor,
                 train_args.eval_harness_tasks,
                 eval_steps=train_args.eval_steps,
-                do_init_eval=train_args.do_init_eval,
+                do_init_eval=train_args.eval_on_start,
                 eval_batch_size=train_args.eval_batch_size,
             )
         )
