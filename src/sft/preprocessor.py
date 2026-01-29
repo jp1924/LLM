@@ -117,6 +117,13 @@ def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list
         if token_start_idx is not None and token_end_idx is not None:
             labels[token_start_idx : token_end_idx + 1] = input_ids[token_start_idx : token_end_idx + 1]
 
+    if labels[-1] == -100:
+        # -100이 아닌 값을 만날 때까지 값을 마지막의 값을 input_ids의 값으로 변경
+        for i in range(len(labels) - 1, -1, -1):
+            if labels[i] != -100:
+                break
+            labels[i] = input_ids[i]
+
     return labels, outputs
 
 
@@ -378,12 +385,6 @@ def processing_datasets(
                         batch_size=train_args.preprocessing_batch_size,
                         desc=f"filter-{repo_name}/{split_key}",
                     )
-
-                # 로깅
-                if is_main:
-                    top_lengths = sorted(dataset[train_args.length_column_name], reverse=True)[:100]
-                    logger.info(f"{repo_name}/{split_key}-length: {[int(l) for l in top_lengths]}")
-                    logger.info(f"{repo_name}/{split_key}-size: {original_size} -> {len(dataset)}")
 
                 # split별로 분류
                 for split_type, prefixes in train_args.dataset_prefix.items():
