@@ -21,15 +21,24 @@ RUN apt-get update && \
     apt-get install -y ffmpeg wget net-tools build-essential git curl vim nmon tmux lsof && \
     ln -s /usr/bin/python3.10 /usr/bin/python
 
+RUN apt-get update && apt-get install -y \
+    fonts-nanum \
+    fontconfig
+
+RUN rm -rf ~/.cache/matplotlib/* && fc-cache -fv
+
 # install uv pip
 ADD https://astral.sh/uv/install.sh /uv-installer.sh
 RUN sh /uv-installer.sh && rm /uv-installer.sh
 ENV PATH="/root/.local/bin/:$PATH"
 
+# clear를 종종 한국어 '칟ㅁㄱ'로 치는 일이 종종 있어서 추가함.
+RUN echo "alias '칟ㅁㄱ'='clear'" >> /root/.bashrc
+
 # install python packages
 RUN uv pip install -U pip wheel setuptools debugpy pydevd
 RUN uv pip install transformers accelerate datasets liger-kernel trl peft deepspeed lomo-optim apollo-torch transformer_engine[pytorch] evaluate \
-    bitsandbytes scipy sentencepiece pillow fastapi uvicorn ruff natsort setproctitle glances[gpu] wandb cmake latex2sympy2_extended math_verify pytest
+    bitsandbytes scipy sentencepiece pillow fastapi uvicorn ruff natsort setproctitle glances[gpu] wandb cmake latex2sympy2_extended math_verify pytest openai koreanize_matplotlib
 
 RUN uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 RUN uv pip install flash_attn --no-build-isolation
