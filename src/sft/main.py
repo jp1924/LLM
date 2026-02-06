@@ -427,5 +427,3 @@ if "__main__" in __name__:
     hf_logging.enable_explicit_format()
 
     main(train_args)
-
-# from transformers import AutoModelForCausalLM
