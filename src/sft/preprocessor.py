@@ -3,15 +3,20 @@ import os
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
 from datasets.config import HF_DATASETS_CACHE
-from trl.data_utils import pack_dataset
+from trl.data_utils import is_conversational, pack_dataset
 
 from transformers import PreTrainedTokenizer, TrainingArguments
 from transformers import logging as hf_logging
+
+
+INPUT_KEYS = {"prompt", "question", "input", "instruction"}
+OUTPUT_KEYS = {"completion", "answer", "label", "output", "response", "assistant"}
+CONVERSATION_KEYS = {"conversations", "conversation", "messages"}
 
 
 hf_logging.set_verbosity_info()
@@ -127,6 +132,109 @@ def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list
     return labels, outputs
 
 
+def _normalize_content(content: Any, has_images: bool) -> Any:
+    """
+    - has_images=True: ensure content is a list of parts (dicts like {"type":"text","text":...} or {"type":"image"}).
+      If content is a JSON string parse it. If it's plain text, wrap into [{"type":"text","text": text}].
+    - has_images=False: return a stripped string. If content is list/dict, extract and join text parts.
+    """
+    if has_images:
+        # target: list[dict]
+        if isinstance(content, str):
+            s = content.strip()
+            if s.startswith("{") or s.startswith("["):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return parsed
+                    if isinstance(parsed, dict):
+                        return [parsed]
+                except Exception:
+                    return [{"type": "text", "text": s}]
+            else:
+                return [{"type": "text", "text": s}]
+        if isinstance(content, dict):
+            return [content]
+        if isinstance(content, list):
+            normalized = []
+            for part in content:
+                if isinstance(part, str):
+                    normalized.append({"type": "text", "text": part})
+                elif isinstance(part, dict):
+                    normalized.append(part)
+                else:
+                    normalized.append({"type": "text", "text": str(part)})
+            return normalized
+        return [{"type": "text", "text": str(content)}]
+    else:
+        # produce plain text
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, dict):
+            # join text fields if present
+            if "text" in content and isinstance(content["text"], str):
+                return content["text"].strip()
+            return str(content)
+        if isinstance(content, list):
+            parts: List[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part.strip())
+                elif isinstance(part, dict) and "text" in part:
+                    parts.append(str(part.get("text", "")).strip())
+                else:
+                    parts.append(str(part))
+            return " ".join([p for p in parts if p])
+        return str(content)
+
+
+def _to_conversational_list(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    for k in CONVERSATION_KEYS:
+        if k in row:
+            val = row[k]
+            if (
+                isinstance(val, list)
+                and len(val) > 0
+                and isinstance(val[0], dict)
+                and "role" in val[0]
+                and "content" in val[0]
+            ):
+                return val
+
+    # 2) TRL식 conversational 감지 (prompt/messages 등)
+    if is_conversational(row):
+        # messages 우선
+        if "messages" in row and isinstance(row["messages"], list):
+            return row["messages"]
+        # prompt(+completion) 형태 -> user/assistant 쌍 생성
+        prompt = row.get("prompt")
+        answer = row.get("completion") or row.get("chosen") or row.get("answer") or row.get("response")
+        if isinstance(prompt, str) or isinstance(prompt, list) or isinstance(prompt, dict):
+            messages = [{"role": "user", "content": prompt}]
+            if answer is not None:
+                messages.append({"role": "assistant", "content": answer})
+            return messages
+
+    # 3) 간단한 QA/INSTRUCTION pair 패턴
+    input_text = None
+    output_text = None
+    for k in INPUT_KEYS:
+        if k in row and isinstance(row[k], (str, list, dict)):
+            input_text = row[k]
+            break
+    for k in OUTPUT_KEYS:
+        if k in row and isinstance(row[k], (str, list, dict)):
+            output_text = row[k]
+            break
+    if input_text is not None:
+        messages = [{"role": "user", "content": input_text}]
+        if output_text is not None:
+            messages.append({"role": "assistant", "content": output_text})
+        return messages
+
+    return None
+
+
 def sft_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArguments) -> Dict[str, list]:
     """통합된 SFT 데이터 전처리 함수 (이미지 처리 포함)"""
     tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
@@ -135,12 +243,22 @@ def sft_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
     for row_dataset in list(zip(*[example[key] for key in example])):
         row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
 
-        images = row_dataset.get("images", None)
-        for chat_turn in row_dataset["conversations"]:
-            content = json.loads(chat_turn["content"]) if images else chat_turn["content"].strip()
-            chat_turn["content"] = content
+        # 대화형 리스트로 정규화
+        conversation = _to_conversational_list(row_dataset)
+        if not conversation:
+            # 처리 불가 항목은 skip
+            continue
 
-        labels, outputs = create_assistant_labels(tokenizer, row_dataset["conversations"], images=images)
+        images = row_dataset.get("images", None)
+        processed_conversations = []
+        for turn in conversation:
+            role = turn.get("role", "user")
+            raw_content = turn.get("content", "")
+
+            parsed = _normalize_content(raw_content, bool(images))
+            processed_conversations.append({"role": role, "content": parsed})
+
+        labels, outputs = create_assistant_labels(tokenizer, processed_conversations, images=images)
 
         finish_data = {
             "labels": labels,
