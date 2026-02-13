@@ -440,10 +440,11 @@ def processing_datasets(
         data_name = train_args.data_name_map.get(repo_name)
         truncate_map = train_args.data_truncate_map.get(repo_name, {}) or {}
         datasets = load_dataset(repo_name, data_name)
+        desired_splits = train_args.data_split_map.get(repo_name, datasets.keys())
 
         # 필요한 split만 유지
         all_prefixes = sum(train_args.dataset_prefix.values(), [])
-        datasets = DatasetDict({k: v for k, v in datasets.items() if k in all_prefixes})
+        datasets = DatasetDict({k: v for k, v in datasets.items() if k in all_prefixes and k in desired_splits})
 
         # 캐시 파일명 생성
         map_cache, filter_cache = _get_cache_dir(train_args, repo_name, data_name, datasets.keys(), truncate_map)
@@ -481,8 +482,6 @@ def processing_datasets(
 
             # 각 split 처리
             for split_key, dataset in datasets.items():
-                original_size = len(dataset)
-
                 # 크기 제한 (truncate)
                 if split_key in truncate_map:
                     truncate_size = truncate_map[split_key]

@@ -79,6 +79,12 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
             "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'data_config_name'}. 데이터셋 로드 시 사용된다."
         },
     )
+    data_split_map: Optional[Union[dict, str]] = field(
+        default_factory=dict,
+        metadata={
+            "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'train'}. 데이터셋 로드 시 사용된다."
+        },
+    )
 
     # -------------------------- Training Args ------------------------- #
 
