@@ -1,6 +1,6 @@
 # SFT
 
-LLM/LMM의 SFT와 Pretrain 학습을 위한 코드 모음.
+LLM/LMM의 SFT와 Pretrain 학습을 위한 코드 모음.<br/>
 Transformers, TRL, DeepSpeed, FSDP 등 오픈소스 라이브러리를 직접 다루며 디버깅하고, PR을 날리기 위한 기준 코드로도 활용한다.
 
 **설계 목표:**
@@ -68,14 +68,14 @@ torchrun / accelerate launch main.py --config config.yaml
 
 ### 전처리 캐시
 
-전처리 결과는 `$HF_DATASETS_CACHE/preprocess_cache/{model_name}/{run_name}/{repo_name}/` 아래에 Arrow 파일로 캐시된다.
+전처리 결과는 `$HF_DATASETS_CACHE/preprocess_cache/{model_name}/{run_name}/{repo_name}/` 아래에 Arrow 파일로 캐시된다.<br/>
 재실행 시 캐시가 있으면 전처리를 건너뛴다.
 
 ---
 
 ## Arguments
 
-`SFTScriptArguments`는 TRL의 `SFTConfig`와 `ModelConfig`를 다중 상속해서 하나의 args에서 모든 설정을 관리한다.
+`SFTScriptArguments`는 TRL의 `SFTConfig`와 `ModelConfig`를 다중 상속해서 하나의 args에서 모든 설정을 관리한다.<br/>
 (wandb에도 TrainingArguments 하나만 기록되기 때문에 별도 dataclass로 분리하지 않음)
 
 ### 데이터 관련 Args
@@ -120,8 +120,8 @@ torchrun / accelerate launch main.py --config config.yaml
 
 ## lm-eval-harness Callback
 
-`eval_harness_tasks`를 설정하면 `EvalHarnessCallBack`이 자동으로 등록된다.
-`eval_steps` 주기마다 현재 학습 중인 모델을 그대로 사용해 lm-eval-harness를 실행하고 wandb에 기록한다.
+`eval_harness_tasks`를 설정하면 `EvalHarnessCallBack`이 자동으로 등록된다.<br/>
+`eval_steps` 주기마다 현재 학습 중인 모델을 그대로 사용해 lm-eval-harness를 실행하고 wandb에 기록한다.<br/>
 별도 체크포인트 저장 후 평가하는 과정 없이 학습 중 실시간 성능 추적이 가능하다.
 
 - Multi-GPU 환경에서 GPU 간 동기화 문제(요청 수 불일치)를 패딩으로 해결한 `CustomHFLM`을 내부적으로 사용한다.
