@@ -47,20 +47,20 @@ torchrun / accelerate launch main.py --config config.yaml
 
 아래 우선순위로 대화 형식을 자동 감지해서 처리한다.
 
-| 우선순위 | 감지 조건 | 비고 |
-|---|---|---|
-| 1 | `conversations` / `conversation` / `messages` 컬럼 (role+content 형식) | 권장 형식 |
-| 2 | TRL conversational 형식 (`messages`, `prompt`+`completion` 등) | TRL 호환 |
-| 3 | 단순 QA 쌍 (`prompt`/`question`/`input`/`instruction` + `completion`/`answer`/`label`/`output`/`response`/`assistant`) | 자동 변환 |
+| 우선순위 | 감지 조건                                                                                                              | 비고      |
+| -------- | :--------------------------------------------------------------------------------------------------------------------- | --------- |
+| 1        | `conversations` / `conversation` / `messages` 컬럼 (role+content 형식)                                                 | 권장 형식 |
+| 2        | TRL conversational 형식 (`messages`, `prompt`+`completion` 등)                                                         | TRL 호환  |
+| 3        | 단순 QA 쌍 (`prompt`/`question`/`input`/`instruction` + `completion`/`answer`/`label`/`output`/`response`/`assistant`) | 자동 변환 |
 
 - `images` 컬럼이 있으면 멀티모달(LMM) 학습으로 자동 처리된다.
 - assistant 턴만 loss를 계산하도록 레이블을 생성한다 (나머지는 `-100`).
 
 ### Pretrain (`data_preprocessor_type: pretrain`)
 
-| 컬럼 | 설명 |
-|---|---|
-| `sentence` | 단일 문자열 |
+| 컬럼          | 설명                          |
+| ------------- | :---------------------------- |
+| `sentence`    | 단일 문자열                   |
 | `sentence_ls` | 문자열 리스트 (배치 tokenize) |
 
 - BOS/EOS 토큰을 자동으로 추가한다.
@@ -80,33 +80,33 @@ torchrun / accelerate launch main.py --config config.yaml
 
 ### 데이터 관련 Args
 
-| 인자 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `dataset_repo_ls` | `List[str]` | `[]` | 학습에 사용할 HuggingFace Hub repo 이름 목록. 예: `["org/repo1", "org/repo2"]` |
-| `data_preprocessor_type` | `str` | — | 전처리 방식 선택. `sft` 또는 `pretrain` |
-| `preprocessing_num_workers` | `int` | `5` | 전처리에 사용할 프로세스 수. `1`이면 싱글 프로세스로 동작 |
-| `preprocessing_batch_size` | `int` | `1000` | `datasets.map` 호출 시 배치 크기 |
-| `dataset_prefix` | `dict` | `{}` | split 이름을 train/valid/test 로 분류하기 위한 prefix 맵. 예: `{"train": ["train"], "valid": ["validation"]}` |
-| `data_truncate_map` | `dict` | `{}` | repo별 샘플 수 제한. 예: `{"org/repo1": {"train": 10000, "validation": 1000}}` |
-| `data_name_map` | `dict` | `{}` | repo별 datasets config name 지정. 예: `{"org/repo1": "ko"}` |
+| 인자                        | 타입        | 기본값 | 설명                                                                                                          |
+| :-------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------- |
+| `dataset_repo_ls`           | `List[str]` | `[]`   | 학습에 사용할 HuggingFace Hub repo 이름 목록. 예: `["org/repo1", "org/repo2"]`                                |
+| `data_preprocessor_type`    | `str`       | —      | 전처리 방식 선택. `sft` 또는 `pretrain`                                                                       |
+| `preprocessing_num_workers` | `int`       | `5`    | 전처리에 사용할 프로세스 수. `1`이면 싱글 프로세스로 동작                                                     |
+| `preprocessing_batch_size`  | `int`       | `1000` | `datasets.map` 호출 시 배치 크기                                                                              |
+| `dataset_prefix`            | `dict`      | `{}`   | split 이름을 train/valid/test 로 분류하기 위한 prefix 맵. 예: `{"train": ["train"], "valid": ["validation"]}` |
+| `data_truncate_map`         | `dict`      | `{}`   | repo별 샘플 수 제한. 예: `{"org/repo1": {"train": 10000, "validation": 1000}}`                                |
+| `data_name_map`             | `dict`      | `{}`   | repo별 datasets config name 지정. 예: `{"org/repo1": "ko"}`                                                   |
 
 ### 모델 / 토크나이저 관련 Args
 
-| 인자 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `model_name_or_path` | `str` | — | 학습할 모델의 Hub repo 또는 로컬 경로 (ModelConfig에서 상속) |
-| `chat_template` | `str` | `None` | 토크나이저에 적용할 chat template. 설정 시 `tokenizer_kwargs`에 자동 포함됨 |
-| `config_kwargs` | `dict` | `{}` | `AutoConfig.from_pretrained`에 전달할 추가 kwargs. `attn_implementation`, `use_cache`는 자동 설정됨 |
-| `tokenizer_kwargs` | `dict` | `{}` | `AutoTokenizer` / `AutoProcessor` 로딩 시 전달할 추가 kwargs. `trust_remote_code`, `revision`은 자동 설정됨 |
-| `attn_implementation` | `str` | — | attention 구현체 선택. `flash_attention_2`, `sdpa`, `eager` (ModelConfig에서 상속). packing 사용 시 `flash_attention_2` 필요 |
-| `torch_dtype` | `str` | — | 모델 dtype. `bfloat16`, `float16`, `float32`, `auto` (ModelConfig에서 상속) |
+| 인자                  | 타입   | 기본값 | 설명                                                                                                                         |
+| --------------------- | :----- | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `model_name_or_path`  | `str`  | —      | 학습할 모델의 Hub repo 또는 로컬 경로 (ModelConfig에서 상속)                                                                 |
+| `chat_template`       | `str`  | `None` | 토크나이저에 적용할 chat template. 설정 시 `tokenizer_kwargs`에 자동 포함됨                                                  |
+| `config_kwargs`       | `dict` | `{}`   | `AutoConfig.from_pretrained`에 전달할 추가 kwargs. `attn_implementation`, `use_cache`는 자동 설정됨                          |
+| `tokenizer_kwargs`    | `dict` | `{}`   | `AutoTokenizer` / `AutoProcessor` 로딩 시 전달할 추가 kwargs. `trust_remote_code`, `revision`은 자동 설정됨                  |
+| `attn_implementation` | `str`  | —      | attention 구현체 선택. `flash_attention_2`, `sdpa`, `eager` (ModelConfig에서 상속). packing 사용 시 `flash_attention_2` 필요 |
+| `torch_dtype`         | `str`  | —      | 모델 dtype. `bfloat16`, `float16`, `float32`, `auto` (ModelConfig에서 상속)                                                  |
 
 ### 평가 관련 Args
 
-| 인자 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `eval_harness_tasks` | `List[str]` | `None` | 학습 중 실행할 lm-eval-harness 태스크 리스트. 설정 시 `EvalHarnessCallBack`이 자동 등록됨. 예: `["hellaswag", "arc_easy"]` |
-| `eval_on_start` | `bool` | `False` | 학습 시작 전(step 0) lm-eval-harness 평가 수행 여부 |
+| 인자                 | 타입        | 기본값  | 설명                                                                                                                       |
+| -------------------- | :---------- | ------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `eval_harness_tasks` | `List[str]` | `None`  | 학습 중 실행할 lm-eval-harness 태스크 리스트. 설정 시 `EvalHarnessCallBack`이 자동 등록됨. 예: `["hellaswag", "arc_easy"]` |
+| `eval_on_start`      | `bool`      | `False` | 학습 시작 전(step 0) lm-eval-harness 평가 수행 여부                                                                        |
 
 ### Sequence Parallelism (SP)
 
