@@ -101,58 +101,6 @@ torchrun / accelerate launch main.py --config config.yaml
 | `attn_implementation` | `str` | — | attention 구현체 선택. `flash_attention_2`, `sdpa`, `eager` (ModelConfig에서 상속). packing 사용 시 `flash_attention_2` 필요 |
 | `torch_dtype` | `str` | — | 모델 dtype. `bfloat16`, `float16`, `float32`, `auto` (ModelConfig에서 상속) |
 
-### 학습 관련 Args
-
-`SFTConfig` / `TrainingArguments`에서 상속된 주요 인자들:
-
-| 인자 | 설명 |
-|---|---|
-| `output_dir` | 체크포인트 저장 경로 |
-| `run_name` | 실험 이름 (wandb, 프로세스 타이틀에 반영) |
-| `max_length` | 시퀀스 최대 길이. 이 값보다 긴 샘플은 train split에서 필터링됨 |
-| `packing` | 시퀀스 패킹 활성화 여부 (`PackingCollatorForLLM` 사용) |
-| `packing_strategy` | 패킹 전략 (`wrapped` / `ffd` 등, TRL 기준) |
-| `eval_packing` | eval 시에도 패킹 적용 여부 |
-| `per_device_train_batch_size` | 디바이스당 배치 크기 |
-| `gradient_accumulation_steps` | gradient accumulation 스텝 수 |
-| `learning_rate` | 학습률 |
-| `lr_scheduler_type` | LR 스케줄러 타입. Transformers 기본 타입 외 `better_cosine` 추가 지원 |
-| `num_train_epochs` | 학습 epoch 수 |
-| `max_steps` | 최대 학습 스텝 수 (`num_train_epochs` 보다 우선) |
-| `warmup_steps` / `warmup_ratio` | warmup 스텝 수 또는 비율 |
-| `gradient_checkpointing` | gradient checkpointing 활성화 (활성화 시 `use_cache=False` 자동 설정) |
-| `resume_from_checkpoint` | 체크포인트에서 재시작할 경로. 설정 시 `model_name_or_path`를 대체함 |
-| `seed` | 랜덤 시드 |
-| `do_train` | 학습 수행 여부 |
-| `do_eval` | 평가 수행 여부 |
-| `eval_strategy` | 평가 주기. `steps`, `epoch`, `no` |
-| `eval_steps` | `eval_strategy=steps` 시 평가 주기 |
-| `save_strategy` | 체크포인트 저장 주기 |
-| `report_to` | 로깅 백엔드. `wandb`, `tensorboard`, `none` 등 |
-| `torch_compile` | `torch.compile` 활성화 여부 |
-| `torch_compile_backend` | `torch.compile` 백엔드 |
-
-### PEFT (LoRA) 관련 Args
-
-`ModelConfig`에서 상속. `use_peft: true` 설정 시 PEFT가 활성화된다.
-
-| 인자 | 설명 |
-|---|---|
-| `use_peft` | PEFT(LoRA) 활성화 여부 |
-| `lora_r` | LoRA rank |
-| `lora_alpha` | LoRA alpha |
-| `lora_dropout` | LoRA dropout |
-| `lora_target_modules` | LoRA를 적용할 모듈 이름 패턴 |
-
-### 양자화 관련 Args
-
-| 인자 | 설명 |
-|---|---|
-| `load_in_4bit` | 4-bit 양자화 로딩 (BitsAndBytes) |
-| `load_in_8bit` | 8-bit 양자화 로딩 (BitsAndBytes) |
-| `bnb_4bit_quant_type` | 4-bit 양자화 타입 (`nf4`, `fp4`) |
-| `bnb_4bit_compute_dtype` | 4-bit 양자화 계산 dtype |
-
 ### 평가 관련 Args
 
 | 인자 | 타입 | 기본값 | 설명 |
@@ -167,25 +115,6 @@ torchrun / accelerate launch main.py --config config.yaml
 - `max_length`가 `world_size`의 배수인지 검증
 - `max_length *= per_device_train_batch_size`, `per_device_train_batch_size = 1`로 자동 조정
 - Collator에서도 `world_size` 배수가 되도록 자동 패딩
-
----
-
-## 커스텀 LR 스케줄러
-
-`optimization.py`에 `better_cosine` 스케줄러가 추가되어 있다.
-
-```yaml
-lr_scheduler_type: better_cosine
-```
-
-기본 cosine에서 아래 파라미터를 추가로 지원한다:
-
-| 파라미터 | 설명 |
-|---|---|
-| `warm_up_type` | warmup 방식. `linear` (기본) 또는 `cosine` |
-| `warmup_pow` | warmup 곡률 조정 (기본 `1.0`) |
-| `decay_pow` | decay 곡률 조정 (기본 `1.0`) |
-| `min_lr_rate` | 최소 LR 비율. 예: `0.1` → 초기 LR의 10%까지만 감소 (기본 `0.0`) |
 
 ---
 
@@ -206,12 +135,12 @@ lr_scheduler_type: better_cosine
 ### yaml 설정 파일 예시 (SFT)
 
 ```yaml
-# 모델
+# modeling
 model_name_or_path: Qwen/Qwen2.5-7B-Instruct
 attn_implementation: flash_attention_2
 torch_dtype: bfloat16
 
-# 데이터
+# data preprocessing
 dataset_repo_ls:
   - org/my-sft-dataset
 data_preprocessor_type: sft
@@ -223,7 +152,7 @@ data_truncate_map:
     train: 50000
 max_length: 4096
 
-# 학습
+# training
 output_dir: ./outputs/qwen2.5-7b-sft
 run_name: qwen2.5-7b-sft-v1
 per_device_train_batch_size: 2
@@ -235,14 +164,14 @@ num_train_epochs: 3
 packing: true
 gradient_checkpointing: true
 
-# 평가
+# lm eval harness와 trainer eval loop
 eval_strategy: steps
 eval_steps: 500
 eval_harness_tasks:
   - hellaswag
   - arc_easy
 
-# 로깅
+# logging
 report_to: wandb
 seed: 42
 ```
