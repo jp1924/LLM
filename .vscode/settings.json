@@ -26,10 +26,11 @@
     "ruff.configuration": "/root/workspace/ruff.toml",
     "files.refactoring.autoSave": true,
     "ruff.lint.preview": true,
+    "ruff.lint.enable": true,
     "ruff.organizeImports": true,
     "ruff.format.preview": false,
-    "ruff.lint.enable": true,
     "ruff.enable": true,
+    "ruff.nativeServer": "on",
     "markdownlint.run": "onSave",
     "python.testing.unittestArgs": [
         "-v",
@@ -49,5 +50,14 @@
         }
     ],
     // shell 닫아도 session 유지하는 것 때문에 변경사항 적용안되던거 해결함.
-    "terminal.integrated.enablePersistentSessions": false
+    "terminal.integrated.enablePersistentSessions": false,
+    "[json]": {
+        "editor.defaultFormatter": "vscode.json-language-features"
+    },
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /root && python -c \"\nfrom transformers import AutoModel\nfrom transformers\\.models\\.hyperclovax_vision\\.configuration_hyperclovax_vision import HyperClovaXConfig\ncfg = HyperClovaXConfig\\(\\)\nmodel = AutoModel\\.from_config\\(cfg\\)\nprint\\(type\\(model\\)\\)\nprint\\('OK'\\)\n\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
 }
