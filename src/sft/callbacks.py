@@ -14,7 +14,7 @@ from lm_eval.tasks import TaskManager, get_task_dict
 from torch.distributed.fsdp import FullyShardedDataParallel
 
 import transformers
-from transformers import Trainer, TrainerCallback, TrainerControl
+from transformers import Trainer, TrainerCallback
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 
