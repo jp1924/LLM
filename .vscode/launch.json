@@ -4,6 +4,41 @@
     // 자세한 내용을 보려면 https://go.microsoft.com/fwlink/?linkid=830387을(를) 방문하세요.
     "version": "0.2.0",
     "configurations": [
+        
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+        },
+        {
+            "name": "VeRL debug attach",
+            "type": "debugpy",
+            "request": "attach",
+            "justMyCode": false,
+            "connect": {
+                "host": "172.23.0.2",
+                "port": 40669
+            }
+        },
+        {
+            "name": "VeRL debug",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "recipe.dapo.main_dapo",
+            "console": "integratedTerminal",
+            "cwd": "/root/verl",
+            "justMyCode": false,
+            "env": {
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "args": [
+                "--config-path=/root/verl/config",
+                "--config-name=grpo_gemma3_dapo",
+                "trainer.experiment_name=debug",
+            ],
+        },
         {
             "name": "run sft debug",
             "type": "debugpy",
@@ -12,8 +47,11 @@
             "console": "integratedTerminal",
             "cwd": "/root/workspace/src/sft",
             "justMyCode": false,
+            // "env": {
+            //     "NCCL_DEBUG": "INFO"
+            // },
             "args": [
-                "--config_file=/root/workspace/config/fsdp2.yaml",
+                "--config_file=/root/workspace/config/accelerator/zero3.yaml",
                 "/root/workspace/src/sft/main.py",
                 "--config",
                 "/root/workspace/run_scripts/sft.yaml"
