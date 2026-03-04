@@ -53,7 +53,7 @@ class CustomHFLM(HFLM):
         self._device = self.accelerator.device
         self._model = pretrained
         self._config = pretrained.config
-        self._rank = self.accelerator.local_process_index
+        self._rank = self.accelerator.process_index
         self._world_size = self.accelerator.num_processes
 
         # determine which of 'causal' and 'seq2seq' backends to use for HF models
