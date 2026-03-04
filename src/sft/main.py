@@ -141,7 +141,7 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
 
         self.model_name_or_path = self.resume_from_checkpoint or self.model_name_or_path
 
-        if self.group_by_length:
+        if hasattr(self, "group_by_length") and self.group_by_length:
             logger.warning("group_by_length이 True임! loss계산에 영향을 끼칠 수 있으니 확인해.")
 
         # SP(Sequence Parallelism) 활성화 시 batch_size에 맞게 max_length 조정
