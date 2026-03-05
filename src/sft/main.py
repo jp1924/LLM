@@ -1,3 +1,4 @@
+import inspect
 import logging
 import sys
 from collections import defaultdict
@@ -17,7 +18,6 @@ from trl import (
     SFTTrainer,
     TrlParser,
     get_kbit_device_map,
-    get_peft_config,
     get_quantization_config,
 )
 
@@ -27,6 +27,11 @@ from transformers import logging as hf_logging
 from transformers.data.data_collator import DataCollatorMixin
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.trainer_pt_utils import get_model_param_count
+from transformers.utils import is_peft_available
+
+
+if is_peft_available():
+    from peft import LoraConfig, PeftConfig
 
 
 # TrainingArguments, ModelArguments, DataArguments 이런식으로 나누면, args관리하기도 어렵고, wandb에는 TrainingArguments만 기록되는 문제가 있기 때문에 이런식으로 상속받아서 하나의 train_args에서 모든 것을 처리할 수 있게 만들었음.
@@ -39,7 +44,7 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         "data_files_map",
         "config_kwargs",
         "tokenizer_kwargs",
-        "dataset_prefix",
+        "lora_kwargs",
     ]
     # -------------------------- Datasets Args ------------------------- #
     dataset_repo_ls: List[str] = field(
@@ -111,6 +116,12 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     tokenizer_kwargs: Optional[Union[dict, str]] = field(
         default_factory=dict,
         metadata={"help": ""},
+    )
+    lora_kwargs: Union[dict, str] | None = field(
+        default_factory=dict,
+        metadata={
+            "help": "PEFT의 LoraConfig에 추가적으로 전달할 인자들을 딕셔너리 형태로 입력한다. 예: {'lora_kwargs': {'initializer_range': 0.02}}. get_peft_config 함수에서 유효한 인자인지 확인한다."
+        },
     )
 
     # -------------------------- Evaluate Args ------------------------- #
@@ -316,6 +327,46 @@ class PackingCollatorForLLM(DataCollatorMixin):
             batch = self._pad_collate(features_ls)
 
         return BatchFeature(batch, self.return_tensors)
+
+
+def get_peft_config(train_args: SFTScriptArguments) -> "PeftConfig | None":
+    is_main = train_args.distributed_state.is_local_main_process
+    if train_args.use_peft is False:
+        return None
+
+    if not is_peft_available():
+        raise ValueError(
+            "You need to have PEFT library installed in your environment, make sure to install `peft`. "
+            "Make sure to run `pip install -U peft`."
+        )
+
+    lora_kwargs = getattr(train_args, "lora_kwargs", {})
+    if lora_kwargs:
+        signature = inspect.signature(LoraConfig.__init__)
+        for key in lora_kwargs.keys():
+            if key not in signature.parameters:
+                raise ValueError(
+                    f"Invalid LoraConfig argument: {key}. Valid arguments are: {list(signature.parameters.keys())}"
+                )
+
+    peft_config = LoraConfig(
+        task_type=train_args.lora_task_type,
+        r=train_args.lora_r,
+        target_modules=train_args.lora_target_modules,
+        target_parameters=train_args.lora_target_parameters,
+        lora_alpha=train_args.lora_alpha,
+        lora_dropout=train_args.lora_dropout,
+        bias="none",
+        use_rslora=train_args.use_rslora,
+        use_dora=train_args.use_dora,
+        modules_to_save=train_args.lora_modules_to_save,
+        **lora_kwargs,
+    )
+
+    if is_main:
+        logger.info(f"PEFT config: {peft_config}")
+
+    return peft_config
 
 
 logger = hf_logging.get_logger("transformers")
