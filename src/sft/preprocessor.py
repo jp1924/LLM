@@ -541,8 +541,13 @@ def processing_datasets(
                     )
 
                 for split_type, prefixes in train_args.dataset_prefix.items():
+                    original_split_type = split_type  # "train", "valid", "test"
                     split_type = "predict" if split_type == "test" else split_type
                     if split_key in prefixes:
+                        repo_allowed = train_args.data_split_map.get(repo_name)
+                        if repo_allowed is not None and original_split_type not in repo_allowed:
+                            continue
+
                         do_flag = getattr(
                             train_args,
                             f"do_{split_type if split_type != 'valid' else 'eval'}",
