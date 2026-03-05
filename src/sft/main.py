@@ -35,6 +35,8 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     _VALID_DICT_FIELDS = SFTConfig._VALID_DICT_FIELDS + [
         "data_truncate_map",
         "data_name_map",
+        "dataset_prefix",
+        "data_files_map",
         "config_kwargs",
         "tokenizer_kwargs",
         "dataset_prefix",
@@ -83,6 +85,12 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         default_factory=dict,
         metadata={
             "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'train'}. 데이터셋 로드 시 사용된다."
+        },
+    )
+    data_files_map: Union[dict, str] | None = field(
+        default_factory=dict,
+        metadata={
+            "help": "local에서 데이터를 불러올 때 {'train': 'train_file_path', 'validation': 'validation_file_path', 'test': 'test_file_path'} 형태로 데이터 파일 경로를 매핑하기 위한 맵. 데이터셋 로드 시 사용된다."
         },
     )
 

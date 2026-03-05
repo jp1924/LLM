@@ -419,11 +419,68 @@ def range_histogram(data, num_bins=50, width=50) -> None:
     logger.info(f"평균값: {sum(data) / len(data):.2f}, 구간 크기: {bin_size:.2f}")
 
 
+def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tuple[Dict[str, str], Dict[str, str]]:
+    model_name_or_path = (
+        Path(train_args.model_name_or_path)
+        if isinstance(train_args.model_name_or_path, str)
+        else train_args.model_name_or_path
+    )
+    repo_name = Path(repo_name) if isinstance(repo_name, str) else repo_name
+    run_name = train_args.run_name.replace("/", "_")
+
+    cache_dir = HF_DATASETS_CACHE / "preprocess_cache" / model_name_or_path.name / run_name / repo_name.name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    map_cache = {split: (cache_dir / f"map_{data_name}-{split}_preprocessor.arrow").as_posix() for split in splits}
+
+    filter_cache = {}
+    for split in splits:
+        truncate_prefix = f"{truncate_map[split]}-" if split in truncate_map else ""
+        filter_cache[split] = (
+            cache_dir / f"filter_{truncate_prefix}{train_args.max_length}_{data_name}-{split}_preprocessor.arrow"
+        ).as_posix()
+
+    return map_cache, filter_cache
+
+
+def _load_repo_datasets(
+    repo_name: str,
+    train_args,
+) -> Tuple[DatasetDict, str]:
+    """
+    1. 로컬 경로 (디렉터리 자동감지 또는 data_files_map)
+    2. HuggingFace Hub 단일 subset
+    3. HuggingFace Hub 복수 subset (list) → split 단위로 병합
+    """
+    if Path(repo_name).exists() and train_args.data_files_map:
+        data_files = train_args.data_files_map.get(repo_name)
+        datasets = load_dataset(repo_name, data_files=data_files)
+        data_name = Path(repo_name).name
+        return datasets, data_name
+
+    raw_names = train_args.data_name_map.get(repo_name)
+    data_names = raw_names if isinstance(raw_names, list) else [raw_names]
+
+    if len(data_names) == 1:
+        datasets = load_dataset(repo_name, data_names[0])
+        data_name = str(data_names[0]) if data_names[0] is not None else ""
+    else:
+        loaded = [load_dataset(repo_name, name) for name in data_names]
+        all_splits = set().union(*[ds.keys() for ds in loaded])
+        datasets = DatasetDict(
+            {split: concatenate_datasets([ds[split] for ds in loaded if split in ds]) for split in all_splits}
+        )
+        data_name = "+".join(str(n) for n in data_names)
+
+    return datasets, data_name
+
+
 def processing_datasets(
     train_args: TrainingArguments, tokenizer: PreTrainedTokenizer
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
     if train_args.data_preprocessor_type not in PROCESSOR_REGISTRY:
         raise ValueError(f"알 수 없는 데이터 프로세서 타입: {train_args.data_preprocessor_type}")
+
     func = PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
 
     start_time = time.time()
@@ -436,15 +493,14 @@ def processing_datasets(
         if is_main:
             logger.info(f"Loading {repo_name}")
 
-        # 데이터셋 로드
-        data_name = train_args.data_name_map.get(repo_name)
+        # 데이터셋 로드 (로컬 / Hub 단일·복수 subset 통합 처리)
+        datasets, data_name = _load_repo_datasets(repo_name, train_args)
+
         truncate_map = train_args.data_truncate_map.get(repo_name, {}) or {}
-        datasets = load_dataset(repo_name, data_name)
-        desired_splits = train_args.data_split_map.get(repo_name, datasets.keys())
 
         # 필요한 split만 유지
         all_prefixes = sum(train_args.dataset_prefix.values(), [])
-        datasets = DatasetDict({k: v for k, v in datasets.items() if k in all_prefixes and k in desired_splits})
+        datasets = DatasetDict({k: v for k, v in datasets.items() if k in all_prefixes})
 
         # 캐시 파일명 생성
         map_cache, filter_cache = _get_cache_dir(train_args, repo_name, data_name, datasets.keys(), truncate_map)
