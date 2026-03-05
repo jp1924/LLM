@@ -3,7 +3,7 @@ import logging
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import List, Union
 
 import datasets
 import optimization
@@ -75,19 +75,19 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
             "help": "데이터셋 로드 시 학습, 검증, 테스트 데이터를 구분하기 위해 사용되는 접두어 딕셔너리. 각 키는 'train', 'valid', 'test'로 구성된다."
         },
     )
-    data_truncate_map: Optional[Union[dict, str]] = field(
+    data_truncate_map: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={
             "help": "데이터의 샘플 개수를 조절하기 위한 맵. 예: {'repo_name': {'train': 3000, 'validation': 1500}}. 데이터셋 처리 시 활용된다."
         },
     )
-    data_name_map: Optional[Union[dict, str]] = field(
+    data_name_map: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={
             "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'data_config_name'}. 데이터셋 로드 시 사용된다."
         },
     )
-    data_split_map: Optional[Union[dict, str]] = field(
+    data_split_map: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={
             "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'train'}. 데이터셋 로드 시 사용된다."
@@ -115,12 +115,12 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         metadata={"help": "The template for chat interactions."},
     )
 
-    config_kwargs: Optional[Union[dict, str]] = field(
+    config_kwargs: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={"help": ""},
     )
 
-    tokenizer_kwargs: Optional[Union[dict, str]] = field(
+    tokenizer_kwargs: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={"help": ""},
     )
@@ -197,10 +197,10 @@ class PackingCollatorForLLM(DataCollatorMixin):
     def __init__(
         self,
         args: SFTScriptArguments,
-        model: "nn.Module",
+        model: "torch.nn.Module",
         tokenizer: Union[AutoProcessor, AutoTokenizer],
-        return_tensors: Optional[str] = "pt",
-        sample_dataset: Optional[Dataset] = None,
+        return_tensors: str | None = "pt",
+        sample_dataset: Dataset | None = None,
     ) -> None:
         """
         Args:
