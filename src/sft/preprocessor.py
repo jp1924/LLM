@@ -3,7 +3,7 @@ import os
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
@@ -56,7 +56,7 @@ def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list
     Args:
         tokenizer: HuggingFace tokenizer
         conversations: 대화 메시지 리스트
-        images: 이미지 리스트 (optional)
+        images: 이미지 리스트
 
     Returns:
         input_ids, labels, outputs
@@ -188,7 +188,7 @@ def _normalize_content(content: Any, has_images: bool) -> Any:
         return str(content)
 
 
-def _to_conversational_list(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+def _to_conversational_list(row: Dict[str, Any]) -> List[Dict[str, Any]] | None:
     for k in CONVERSATION_KEYS:
         if k in row:
             val = row[k]
@@ -321,10 +321,8 @@ def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tu
     cache_dir = HF_DATASETS_CACHE / "preprocess_cache" / model_name_or_path.name / run_name / repo_name.name
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # map 캐시: 전처리 결과 저장
     map_cache = {split: (cache_dir / f"map_{data_name}-{split}_preprocessor.arrow").as_posix() for split in splits}
 
-    # filter 캐시: 필터링 결과 저장
     filter_cache = {}
     for split in splits:
         truncate_prefix = f"{truncate_map[split]}-" if split in truncate_map else ""
@@ -336,31 +334,15 @@ def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tu
 
 
 def check_dataset_cache_exists(
-    map_cache: Dict[str, str],
-    filter_cache: Optional[Dict[str, str]],
-    train_split_keys: list,
-    num_proc: Optional[int] = None,
+    map_cache: Dict[str, str], filter_cache: Dict[str, str] | None, train_split_keys: list, num_proc: int | None = None
 ) -> bool:
     def check_cache_files_exist(
         cache_file_path: str,
-        num_proc: Optional[int] = None,
+        num_proc: int | None = None,
     ) -> bool:
-        """
-        캐시 파일들이 모두 존재하는지 확인
-
-        Args:
-            cache_file_path: 기본 캐시 파일 경로
-            num_proc: 멀티프로세싱 worker 수
-
-        Returns:
-            모든 캐시 파일이 존재하면 True
-        """
-        # 단일 프로세스 또는 num_proc이 지정되지 않은 경우
         if num_proc is None or num_proc <= 1:
             return os.path.exists(cache_file_path)
 
-        # 멀티프로세싱: 모든 worker의 캐시 파일 확인
-        # datasets는 suffix 패턴을 사용: {base}_{rank:05d}_of_{num_proc:05d}.arrow
         base_name = os.path.splitext(cache_file_path)[0]
         for rank in range(num_proc):
             cache_file = f"{base_name}_{rank:05d}_of_{num_proc:05d}.arrow"
@@ -369,16 +351,13 @@ def check_dataset_cache_exists(
 
         return True
 
-    # map 캐시 확인
     for split_key, cache_path in map_cache.items():
         if not check_cache_files_exist(cache_path, num_proc):
             return False
 
-    # filter 캐시 확인 (train split만)
     if filter_cache:
         for split_key, cache_path in filter_cache.items():
             if split_key in train_split_keys:
-                # filter는 항상 단일 파일 (num_proc 고려 필요)
                 if not check_cache_files_exist(cache_path, num_proc):
                     return False
 
@@ -386,7 +365,6 @@ def check_dataset_cache_exists(
 
 
 def range_histogram(data, num_bins=50, width=50) -> None:
-    """데이터 분포를 히스토그램으로 시각화"""
     if not data:
         return
 
@@ -477,7 +455,16 @@ def _load_repo_datasets(
 
 def processing_datasets(
     train_args: TrainingArguments, tokenizer: PreTrainedTokenizer
-) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset]]:
+) -> Tuple[Dataset | None, Dataset | None, Dataset | None]:
+    def merge_datasets(dataset_list, name):
+        if not dataset_list:
+            return None
+        combined = concatenate_datasets(dataset_list)
+        None if train_args.packing else combined.set_format("pt")
+        if is_main:
+            logger.info(f"{name}_dataset:\n{combined}")
+        return combined
+
     if train_args.data_preprocessor_type not in PROCESSOR_REGISTRY:
         raise ValueError(f"알 수 없는 데이터 프로세서 타입: {train_args.data_preprocessor_type}")
 
@@ -486,7 +473,6 @@ def processing_datasets(
     start_time = time.time()
     is_main = train_args.distributed_state.is_local_main_process
 
-    # 데이터셋 저장소
     datasets_by_split = {"train": [], "valid": [], "test": []}
 
     for repo_name in train_args.dataset_repo_ls:
@@ -505,7 +491,6 @@ def processing_datasets(
         # 캐시 파일명 생성
         map_cache, filter_cache = _get_cache_dir(train_args, repo_name, data_name, datasets.keys(), truncate_map)
 
-        # 캐시 존재 여부 확인 및 main_process_first 적용
         cache_exists = check_dataset_cache_exists(
             map_cache=map_cache,
             filter_cache=filter_cache,
@@ -522,7 +507,6 @@ def processing_datasets(
             if use_main_process_first
             else nullcontext()
         ):
-            # 전처리 (토크나이징 등)
             datasets = datasets.map(
                 func,
                 num_proc=train_args.preprocessing_num_workers,
@@ -536,9 +520,7 @@ def processing_datasets(
                 fn_kwargs={"tokenizer": tokenizer, "args": train_args},
             )
 
-            # 각 split 처리
             for split_key, dataset in datasets.items():
-                # 크기 제한 (truncate)
                 if split_key in truncate_map:
                     truncate_size = truncate_map[split_key]
                     if len(dataset) > truncate_size:
@@ -546,7 +528,6 @@ def processing_datasets(
                     elif is_main:
                         logger.info(f"{repo_name}/{split_key}: 크기 {len(dataset)} <= truncate {truncate_size}")
 
-                # 길이 필터링 (train만)
                 if split_key in train_args.dataset_prefix["train"] and train_args.do_train:
                     dataset = dataset.filter(
                         lambda lengths: [l <= train_args.max_length for l in lengths],
@@ -559,7 +540,6 @@ def processing_datasets(
                         desc=f"filter-{repo_name}/{split_key}",
                     )
 
-                # split별로 분류
                 for split_type, prefixes in train_args.dataset_prefix.items():
                     split_type = "predict" if split_type == "test" else split_type
                     if split_key in prefixes:
@@ -570,16 +550,6 @@ def processing_datasets(
                         if do_flag:
                             datasets_by_split[split_type].append(dataset)
 
-    # 데이터셋 병합
-    def merge_datasets(dataset_list, name):
-        if not dataset_list:
-            return None
-        combined = concatenate_datasets(dataset_list)
-        None if train_args.packing else combined.set_format("pt")
-        if is_main:
-            logger.info(f"{name}_dataset:\n{combined}")
-        return combined
-
     train_dataset = merge_datasets(datasets_by_split["train"], "train")
     valid_dataset = merge_datasets(datasets_by_split["valid"], "valid")
     test_dataset = merge_datasets(datasets_by_split["test"], "test")
@@ -587,7 +557,6 @@ def processing_datasets(
     if is_main:
         logger.info(f"load_dataset_time: {time.time() - start_time:.2f}s")
 
-    # Packing
     if train_dataset and train_args.packing:
         train_dataset = train_dataset.remove_columns("length")
         train_dataset = pack_dataset(
