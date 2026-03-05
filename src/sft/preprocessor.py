@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
 from datasets.config import HF_DATASETS_CACHE
+from main import SFTScriptArguments
 from trl.data_utils import is_conversational, pack_dataset
 
 from transformers import PreTrainedTokenizer, TrainingArguments
@@ -334,7 +335,10 @@ def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tu
 
 
 def check_dataset_cache_exists(
-    map_cache: Dict[str, str], filter_cache: Dict[str, str] | None, train_split_keys: list, num_proc: int | None = None
+    map_cache: Dict[str, str],
+    train_split_keys: list,
+    filter_cache: Dict[str, str] | None,
+    num_proc: int | None = None,
 ) -> bool:
     def check_cache_files_exist(
         cache_file_path: str,
@@ -424,11 +428,12 @@ def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tu
 def _load_repo_datasets(
     repo_name: str,
     train_args,
+    truncate_map: Dict[str, int],
 ) -> Tuple[DatasetDict, str]:
     """
     1. 로컬 경로 (디렉터리 자동감지 또는 data_files_map)
     2. HuggingFace Hub 단일 subset
-    3. HuggingFace Hub 복수 subset (list) → split 단위로 병합
+    3. HuggingFace Hub 복수 subset (list) → subset별 truncate 후 split 단위로 병합
     """
     if Path(repo_name).exists() and train_args.data_files_map:
         data_files = train_args.data_files_map.get(repo_name)
@@ -443,10 +448,21 @@ def _load_repo_datasets(
         datasets = load_dataset(repo_name, data_names[0])
         data_name = str(data_names[0]) if data_names[0] is not None else ""
     else:
-        loaded = [load_dataset(repo_name, name) for name in data_names]
-        all_splits = set().union(*[ds.keys() for ds in loaded])
+        loaded = [(load_dataset(repo_name, name), name) for name in data_names]
+
+        # subset별로 truncate 적용 후 병합
+        truncated = []
+        for subset_ds, name in loaded:
+            truncated_splits = {}
+            for split, dataset in subset_ds.items():
+                if f"{name}-{split}" in truncate_map and len(dataset) > truncate_map[f"{name}-{split}"]:
+                    dataset = dataset.shuffle().select(range(truncate_map[f"{name}-{split}"]))
+                truncated_splits[split] = dataset
+            truncated.append(DatasetDict(truncated_splits))
+
+        all_splits = set().union(*[ds.keys() for ds in truncated])
         datasets = DatasetDict(
-            {split: concatenate_datasets([ds[split] for ds in loaded if split in ds]) for split in all_splits}
+            {split: concatenate_datasets([ds[split] for ds in truncated if split in ds]) for split in all_splits}
         )
         data_name = "+".join(str(n) for n in data_names)
 
@@ -454,9 +470,9 @@ def _load_repo_datasets(
 
 
 def processing_datasets(
-    train_args: TrainingArguments, tokenizer: PreTrainedTokenizer
+    train_args: SFTScriptArguments, tokenizer: PreTrainedTokenizer
 ) -> Tuple[Dataset | None, Dataset | None, Dataset | None]:
-    def merge_datasets(dataset_list, name):
+    def merge_datasets(dataset_list: List[Dataset], name: str) -> Dataset:
         if not dataset_list:
             return None
         combined = concatenate_datasets(dataset_list)
@@ -480,9 +496,8 @@ def processing_datasets(
             logger.info(f"Loading {repo_name}")
 
         # 데이터셋 로드 (로컬 / Hub 단일·복수 subset 통합 처리)
-        datasets, data_name = _load_repo_datasets(repo_name, train_args)
-
-        truncate_map = train_args.data_truncate_map.get(repo_name, {}) or {}
+        truncate_map = train_args.data_truncate_map.get(repo_name)
+        datasets, data_name = _load_repo_datasets(repo_name, train_args, truncate_map)
 
         # 필요한 split만 유지
         all_prefixes = sum(train_args.dataset_prefix.values(), [])
@@ -493,9 +508,9 @@ def processing_datasets(
 
         cache_exists = check_dataset_cache_exists(
             map_cache=map_cache,
+            num_proc=train_args.preprocessing_num_workers,
             filter_cache=filter_cache,
             train_split_keys=train_args.dataset_prefix.get("train", []),
-            num_proc=train_args.preprocessing_num_workers,
         )
         use_main_process_first = not cache_exists
 
