@@ -167,7 +167,7 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         self.parallelism_config = ParallelismConfig()
         self.dataloader_configuration = DataLoaderConfiguration()
 
-        if self.parallelism_config.sp_enabled:
+        if self.sp_enabled:
             if self.max_length % self.world_size != 0:
                 raise ValueError(
                     f"SP(Sequence Parallelism) 활성화 시 max_length가 world_size({self.world_size})의 배수가 되어야 합니다. "
