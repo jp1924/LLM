@@ -78,7 +78,7 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     data_truncate_map: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={
-            "help": "데이터의 샘플 개수를 조절하기 위한 맵. 예: {'repo_name': {'train': 3000, 'validation': 1500}}. 데이터셋 처리 시 활용된다."
+            "help": "데이터의 샘플 개수를 조절하기 위한 맵. 예: {'repo_name': {'train': 3000, 'validation': 1500}}. 데이터셋 처리 시 활용된다. subset 단위로 자르고 싶을 때는 {'repo_name-subset_name': 5000} 형태로 입력하면 된다."
         },
     )
     data_name_map: Union[dict, str] | None = field(

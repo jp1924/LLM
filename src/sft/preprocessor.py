@@ -448,15 +448,15 @@ def _load_repo_datasets(
         datasets = load_dataset(repo_name, data_names[0])
         data_name = str(data_names[0]) if data_names[0] is not None else ""
     else:
-        loaded = [(load_dataset(repo_name, name), name) for name in data_names]
+        loaded = [(load_dataset(repo_name, name), f"{repo_name}-{name}") for name in data_names]
 
         # subset별로 truncate 적용 후 병합
         truncated = []
         for subset_ds, name in loaded:
             truncated_splits = {}
             for split, dataset in subset_ds.items():
-                if f"{name}-{split}" in truncate_map and len(dataset) > truncate_map[f"{name}-{split}"]:
-                    dataset = dataset.shuffle().select(range(truncate_map[f"{name}-{split}"]))
+                if name in truncate_map and len(dataset) > truncate_map[name]:
+                    dataset = dataset.select(range(truncate_map[name]))
                 truncated_splits[split] = dataset
             truncated.append(DatasetDict(truncated_splits))
 
