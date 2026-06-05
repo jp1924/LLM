@@ -1,23 +1,29 @@
+import glob
 import json
 import os
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
 import numpy as np
-from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 from datasets.config import HF_DATASETS_CACHE
-from main import SFTScriptArguments
 from trl.data_utils import is_conversational, pack_dataset
 
 from transformers import PreTrainedTokenizer, TrainingArguments
 from transformers import logging as hf_logging
 
 
+if TYPE_CHECKING:
+    from main import SFTScriptArguments
+
+
 INPUT_KEYS = {"prompt", "question", "input", "instruction"}
 OUTPUT_KEYS = {"completion", "answer", "label", "output", "response", "assistant"}
 CONVERSATION_KEYS = {"conversations", "conversation", "messages"}
+
+_DO_FLAG = {"train": "do_train", "valid": "do_eval", "test": "do_predict"}
 
 
 hf_logging.set_verbosity_info()
@@ -25,7 +31,11 @@ logger = hf_logging.get_logger("transformers")
 
 
 def get_sentencepiece_offset(tokenizer, input_ids) -> Tuple[list, str]:
-    """토큰 오프셋 계산"""
+    """slow(sentencepiece) tokenizer 용: 토큰을 디코딩해 char offset을 직접 계산한다.
+
+    fast tokenizer는 `return_offsets_mapping`을 지원하지만, slow tokenizer는
+    `char_to_token`/`return_offsets_mapping`이 `ValueError`를 던지므로 이 fallback이 필요하다.
+    """
     tokens = tokenizer.batch_decode([[token_id] for token_id in input_ids])
     special_tokens_set = set(tokenizer.all_special_tokens) | set(tokenizer.added_tokens_encoder.keys())
 
@@ -50,55 +60,59 @@ def get_sentencepiece_offset(tokenizer, input_ids) -> Tuple[list, str]:
     return positions, "".join(text_parts)
 
 
-def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list, list, dict]:
-    """
-    Assistant 응답 구간만 학습하도록 레이블 생성
+def _fix_trailing_labels(labels: list, input_ids: list) -> list:
+    """마지막 턴의 종료 토큰(EOS 등)까지 학습하도록 뒤쪽 -100 꼬리를 복원한다."""
+    if labels and labels[-1] == -100:
+        for i in range(len(labels) - 1, -1, -1):
+            if labels[i] != -100:
+                break
+            labels[i] = input_ids[i]
+    return labels
 
-    Args:
-        tokenizer: HuggingFace tokenizer
-        conversations: 대화 메시지 리스트
-        images: 이미지 리스트
 
-    Returns:
-        input_ids, labels, outputs
-    """
-    if len(conversations) % 2:
-        raise ValueError("Conversations should have an even number of messages (user starts, assistant ends).")
+def _assistant_text(content: Any) -> str:
+    """assistant 턴 content를 검색용 문자열로 변환 (멀티모달이면 text 파트만)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text"
+        ).strip()
+    return str(content)
 
-    # Chat template 적용 및 토큰화
-    outputs = tokenizer(
-        **{
-            "text": tokenizer.apply_chat_template(conversations, tokenize=False),
-            **({"images": images} if images else {}),
-        },
-        return_attention_mask=False,
-        add_special_tokens=False,
-    )
 
-    text = tokenizer.decode(outputs.input_ids)
+def _labels_via_offsets(enc, text: str, conversations: list, input_ids: list) -> list:
+    """fast tokenizer: char_to_token 으로 assistant 구간 → labels."""
+    labels = [-100] * len(input_ids)
+    for chat in conversations:
+        if chat["role"] != "assistant":
+            continue
+        answer = _assistant_text(chat["content"])
+        start_idx = text.find(answer)
+        if start_idx == -1:
+            raise ValueError(f"tokenizer is weird. cannot find assistant content: {answer} > {text}")
+        end_idx = start_idx + len(answer)
 
-    # BOS/EOS 토큰 추가
-    if tokenizer.bos_token and not text.strip().startswith(tokenizer.bos_token):
-        text = tokenizer.bos_token + text
-    if tokenizer.eos_token and not text.strip().endswith(tokenizer.eos_token):
-        text = text + tokenizer.eos_token
+        token_start = enc.char_to_token(start_idx)
+        # 종료 토큰(턴 terminator)까지 포함해 stop을 학습. 마지막 글자면 종료 토큰이 없을 수 있음.
+        token_end = enc.char_to_token(end_idx)
+        if token_end is None:
+            token_end = enc.char_to_token(end_idx - 1)
 
-    # 최종 인코딩 및 오프셋 계산
-    input_ids = tokenizer.encode(text, add_special_tokens=False)
-    outputs.update({"input_ids": input_ids})
+        if token_start is not None and token_end is not None:
+            labels[token_start : token_end + 1] = input_ids[token_start : token_end + 1]
+
+    return _fix_trailing_labels(labels, input_ids)
+
+
+def _labels_via_sentencepiece(tokenizer, input_ids: list, conversations: list) -> list:
+    """slow tokenizer: 디코딩-공간 문자열 매칭으로 assistant 구간 → labels (기존 방식 유지)."""
     offset_ls, text = get_sentencepiece_offset(tokenizer, input_ids)
 
-    # Assistant 응답만 필터링
     answer_ls = [chat["content"] for chat in conversations if chat["role"] == "assistant"]
     answer_ids_list = tokenizer(answer_ls, add_special_tokens=False).input_ids
+    all_answer_tokens = ["".join(tokenizer.batch_decode([[tid] for tid in ids])) for ids in answer_ids_list]
 
-    # batch_decode로 한 번에 처리
-    all_answer_tokens = []
-    for ids in answer_ids_list:
-        tokens = tokenizer.batch_decode([[token_id] for token_id in ids])
-        all_answer_tokens.append("".join(tokens))
-
-    # 위치 계산
     answer_pos_ls = []
     for new_answer in all_answer_tokens:
         start_idx = text.find(new_answer)
@@ -106,12 +120,10 @@ def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list
             raise ValueError(f"tokenizer is weird. cannot find assistant content: {new_answer} > {text}")
         answer_pos_ls.append((start_idx, start_idx + len(new_answer) + 1))
 
-    # 레이블 생성
     labels = [-100] * len(input_ids)
     for start_idx, end_idx in answer_pos_ls:
         token_start_idx = None
         token_end_idx = None
-
         for idx, _, start, _, _ in offset_ls:
             if start >= start_idx and token_start_idx is None:
                 token_start_idx = idx
@@ -119,77 +131,87 @@ def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list
                 token_end_idx = idx
             elif token_start_idx is not None:
                 break
-
         if token_start_idx is not None and token_end_idx is not None:
             labels[token_start_idx : token_end_idx + 1] = input_ids[token_start_idx : token_end_idx + 1]
 
-    if labels[-1] == -100:
-        # -100이 아닌 값을 만날 때까지 값을 마지막의 값을 input_ids의 값으로 변경
-        for i in range(len(labels) - 1, -1, -1):
-            if labels[i] != -100:
-                break
-            labels[i] = input_ids[i]
+    return _fix_trailing_labels(labels, input_ids)
+
+
+def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list, Any]:
+    """Assistant 응답 구간만 학습하도록 레이블 생성.
+
+    - fast tokenizer: `return_offsets_mapping` + `char_to_token` (네이티브, 빠름)
+    - slow tokenizer: `get_sentencepiece_offset` 기반 수동 매칭 (기존 동작 보존)
+    """
+    if len(conversations) % 2:
+        raise ValueError("Conversations should have an even number of messages (user starts, assistant ends).")
+
+    rendered = tokenizer.apply_chat_template(conversations, tokenize=False)
+    outputs = tokenizer(
+        **{"text": rendered, **({"images": images} if images else {})},
+        return_attention_mask=False,
+        add_special_tokens=False,
+    )
+
+    text = tokenizer.decode(outputs.input_ids)
+    if tokenizer.bos_token and not text.strip().startswith(tokenizer.bos_token):
+        text = tokenizer.bos_token + text
+    if tokenizer.eos_token and not text.strip().endswith(tokenizer.eos_token):
+        text = text + tokenizer.eos_token
+
+    if tokenizer.is_fast and not images:
+        enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+        input_ids = enc["input_ids"]
+        outputs.update({"input_ids": input_ids})
+        labels = _labels_via_offsets(enc, text, conversations, input_ids)
+    else:
+        input_ids = tokenizer.encode(text, add_special_tokens=False)
+        outputs.update({"input_ids": input_ids})
+        labels = _labels_via_sentencepiece(tokenizer, input_ids, conversations)
 
     return labels, outputs
 
 
+def _part_text(part: Any) -> str:
+    """멀티모달 part 하나에서 텍스트만 추출."""
+    if isinstance(part, str):
+        return part.strip()
+    if isinstance(part, dict) and isinstance(part.get("text"), str):
+        return part["text"].strip()
+    return str(part)
+
+
 def _normalize_content(content: Any, has_images: bool) -> Any:
-    """
-    - has_images=True: ensure content is a list of parts (dicts like {"type":"text","text":...} or {"type":"image"}).
-      If content is a JSON string parse it. If it's plain text, wrap into [{"type":"text","text": text}].
-    - has_images=False: return a stripped string. If content is list/dict, extract and join text parts.
-    """
-    if has_images:
-        # target: list[dict]
-        if isinstance(content, str):
-            s = content.strip()
-            if s.startswith("{") or s.startswith("["):
-                try:
-                    parsed = json.loads(s)
-                    if isinstance(parsed, list):
-                        return parsed
-                    if isinstance(parsed, dict):
-                        return [parsed]
-                except Exception:
-                    return [{"type": "text", "text": s}]
-            else:
-                return [{"type": "text", "text": s}]
-        if isinstance(content, dict):
-            return [content]
-        if isinstance(content, list):
-            normalized = []
-            for part in content:
-                if isinstance(part, str):
-                    normalized.append({"type": "text", "text": part})
-                elif isinstance(part, dict):
-                    normalized.append(part)
-                else:
-                    normalized.append({"type": "text", "text": str(part)})
-            return normalized
-        return [{"type": "text", "text": str(content)}]
-    else:
-        # produce plain text
+    """has_images=True 면 part 리스트(list[dict]), False 면 텍스트 문자열로 정규화."""
+    if not has_images:
         if isinstance(content, str):
             return content.strip()
-        if isinstance(content, dict):
-            # join text fields if present
-            if "text" in content and isinstance(content["text"], str):
-                return content["text"].strip()
-            return str(content)
         if isinstance(content, list):
-            parts: List[str] = []
-            for part in content:
-                if isinstance(part, str):
-                    parts.append(part.strip())
-                elif isinstance(part, dict) and "text" in part:
-                    parts.append(str(part.get("text", "")).strip())
-                else:
-                    parts.append(str(part))
-            return " ".join([p for p in parts if p])
+            return " ".join(t for t in (_part_text(p) for p in content) if t)
+        if isinstance(content, dict):
+            text = content.get("text")
+            return text.strip() if isinstance(text, str) else str(content)
         return str(content)
+
+    # has_images=True → list[dict]
+    if isinstance(content, str):
+        s = content.strip()
+        if s[:1] in ("{", "["):
+            try:
+                parsed = json.loads(s)
+                return parsed if isinstance(parsed, list) else [parsed]
+            except Exception:
+                pass
+        return [{"type": "text", "text": s}]
+    if isinstance(content, dict):
+        return [content]
+    if isinstance(content, list):
+        return [p if isinstance(p, dict) else {"type": "text", "text": str(p)} for p in content]
+    return [{"type": "text", "text": str(content)}]
 
 
 def _to_conversational_list(row: Dict[str, Any]) -> List[Dict[str, Any]] | None:
+    # 1) conversations/conversation/messages 컬럼 (role+content 형식)
     for k in CONVERSATION_KEYS:
         if k in row:
             val = row[k]
@@ -204,13 +226,11 @@ def _to_conversational_list(row: Dict[str, Any]) -> List[Dict[str, Any]] | None:
 
     # 2) TRL식 conversational 감지 (prompt/messages 등)
     if is_conversational(row):
-        # messages 우선
         if "messages" in row and isinstance(row["messages"], list):
             return row["messages"]
-        # prompt(+completion) 형태 -> user/assistant 쌍 생성
         prompt = row.get("prompt")
         answer = row.get("completion") or row.get("chosen") or row.get("answer") or row.get("response")
-        if isinstance(prompt, str) or isinstance(prompt, list) or isinstance(prompt, dict):
+        if isinstance(prompt, (str, list, dict)):
             messages = [{"role": "user", "content": prompt}]
             if answer is not None:
                 messages.append({"role": "assistant", "content": answer})
@@ -236,210 +256,79 @@ def _to_conversational_list(row: Dict[str, Any]) -> List[Dict[str, Any]] | None:
     return None
 
 
+def _iter_rows(example: Dict[str, list]):
+    keys = list(example.keys())
+    for values in zip(*(example[k] for k in keys)):
+        yield dict(zip(keys, values))
+
+
+def _columnar(rows: List[dict]) -> Dict[str, list]:
+    out: Dict[str, list] = {}
+    for row in rows:
+        for key, value in row.items():
+            out.setdefault(key, []).append(value)
+    return out
+
+
 def sft_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArguments) -> Dict[str, list]:
     """통합된 SFT 데이터 전처리 함수 (이미지 처리 포함)"""
     tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
-    process_finish_ls = list()
 
-    for row_dataset in list(zip(*[example[key] for key in example])):
-        row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
-
-        # 대화형 리스트로 정규화
-        conversation = _to_conversational_list(row_dataset)
+    rows = []
+    for row in _iter_rows(example):
+        conversation = _to_conversational_list(row)
         if not conversation:
-            # 처리 불가 항목은 skip
             continue
 
-        images = row_dataset.get("images", None)
-        processed_conversations = []
-        for turn in conversation:
-            role = turn.get("role", "user")
-            raw_content = turn.get("content", "")
+        images = row.get("images", None)
+        processed = [
+            {"role": turn.get("role", "user"), "content": _normalize_content(turn.get("content", ""), bool(images))}
+            for turn in conversation
+        ]
 
-            parsed = _normalize_content(raw_content, bool(images))
-            processed_conversations.append({"role": role, "content": parsed})
+        labels, outputs = create_assistant_labels(tokenizer, processed, images=images)
+        rows.append({"labels": labels, args.length_column_name: len(outputs.input_ids), **outputs})
 
-        labels, outputs = create_assistant_labels(tokenizer, processed_conversations, images=images)
-
-        finish_data = {
-            "labels": labels,
-            args.length_column_name: len(outputs.input_ids),
-            **outputs,
-        }
-
-        process_finish_ls.append(finish_data)
-
-    # 결과 딕셔너리 생성
-    return_dict = dict()
-    for res in process_finish_ls:
-        for key, value in res.items():
-            return_dict.setdefault(key, []).append(value)
-
-    return return_dict
+    return _columnar(rows)
 
 
 def pretrain_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArguments) -> Dict[str, list]:
-    process_finish_ls = list()
-    for row_dataset in list(zip(*[example[key] for key in example])):
-        row_dataset = {key: value for key, value in zip(example.keys(), row_dataset)}  # noqa: C416
-        sentence = row_dataset["sentence_ls" if "sentence_ls" in row_dataset else "sentence"]
-        outputs = tokenizer(sentence, return_length=True, return_tensors="np")
-        input_ids_ls, length_ls = outputs.input_ids, outputs.length
+    tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
 
-        for input_ids, length in zip(input_ids_ls, length_ls):
+    rows = []
+    for row in _iter_rows(example):
+        sentence = row["sentence_ls" if "sentence_ls" in row else "sentence"]
+        outputs = tokenizer(sentence, return_length=True, return_tensors="np")
+
+        for input_ids, length in zip(outputs.input_ids, outputs.length):
             if not np.isin(input_ids, tokenizer.eos_token_id).any():
                 input_ids = np.append(input_ids, tokenizer.eos_token_id)
             if not np.isin(input_ids, tokenizer.bos_token_id).any():
                 input_ids = np.insert(input_ids, 0, tokenizer.bos_token_id)
+            rows.append({"input_ids": input_ids, args.length_column_name: length})
 
-            finish_data = {"input_ids": input_ids, args.length_column_name: length}
-            process_finish_ls.append(finish_data)
-
-    return_dict = dict()
-    for res in process_finish_ls:
-        for key, value in res.items():
-            return_dict.setdefault(key, []).append(value)
-
-    return return_dict
+    return _columnar(rows)
 
 
 PROCESSOR_REGISTRY = {"sft": sft_processor, "pretrain": pretrain_processor}
 
 
-#############################################################################################################
-
-
-def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """캐시 파일명 생성 헬퍼 함수"""
-    model_name_or_path = (
-        Path(train_args.model_name_or_path)
-        if isinstance(train_args.model_name_or_path, str)
-        else train_args.model_name_or_path
-    )
-    repo_name = Path(repo_name) if isinstance(repo_name, str) else repo_name
-    run_name = train_args.run_name.replace("/", "_")
-
-    cache_dir = HF_DATASETS_CACHE / "preprocess_cache" / model_name_or_path.name / run_name / repo_name.name
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    map_cache = {split: (cache_dir / f"map_{data_name}-{split}_preprocessor.arrow").as_posix() for split in splits}
-
-    filter_cache = {}
-    for split in splits:
-        truncate_prefix = f"{truncate_map[split]}-" if split in truncate_map else ""
-        filter_cache[split] = (
-            cache_dir / f"filter_{truncate_prefix}{train_args.max_length}_{data_name}-{split}_preprocessor.arrow"
-        ).as_posix()
-
-    return map_cache, filter_cache
-
-
-def check_dataset_cache_exists(
-    map_cache: Dict[str, str],
-    train_split_keys: list,
-    filter_cache: Dict[str, str] | None,
-    num_proc: int | None = None,
-) -> bool:
-    def check_cache_files_exist(
-        cache_file_path: str,
-        num_proc: int | None = None,
-    ) -> bool:
-        if num_proc is None or num_proc <= 1:
-            return os.path.exists(cache_file_path)
-
-        base_name = os.path.splitext(cache_file_path)[0]
-        for rank in range(num_proc):
-            cache_file = f"{base_name}_{rank:05d}_of_{num_proc:05d}.arrow"
-            if not os.path.exists(cache_file):
-                return False
-
-        return True
-
-    for split_key, cache_path in map_cache.items():
-        if not check_cache_files_exist(cache_path, num_proc):
-            return False
-
-    if filter_cache:
-        for split_key, cache_path in filter_cache.items():
-            if split_key in train_split_keys:
-                if not check_cache_files_exist(cache_path, num_proc):
-                    return False
-
-    return True
-
-
-def range_histogram(data, num_bins=50, width=50) -> None:
-    if not data:
-        return
-
-    min_val, max_val = min(data), max(data)
-    bin_size = (max_val - min_val) / num_bins
-
-    # 빈도수 계산
-    bins = [0] * num_bins
-    for value in data:
-        bin_index = min(int((value - min_val) / bin_size), num_bins - 1)
-        bins[bin_index] += 1
-
-    max_freq = max(bins)
-
-    # 출력
-    logger.info(f"\nHistogram (total {len(data)} items, {num_bins} bins)")
-    logger.info("-" * 80)
-    logger.info(f"Range{' ' * 18}Count  Distribution")
-    logger.info("-" * 80)
-
-    for i, count in enumerate(bins):
-        start = min_val + (i * bin_size)
-        end = min_val + ((i + 1) * bin_size)
-        bar = "█" * int((count / max_freq) * width)
-        logger.info(f"{start:8.0f}-{end:8.0f}: {count:6d} |{bar}")
-
-    logger.info("-" * 80)
-    logger.info("\nStatistics:")
-    logger.info(f"데이터 개수: {len(data)}, 최소값: {min_val:.0f}, 최대값: {max_val:.0f}")
-    logger.info(f"평균값: {sum(data) / len(data):.2f}, 구간 크기: {bin_size:.2f}")
-
-
-def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tuple[Dict[str, str], Dict[str, str]]:
-    model_name_or_path = (
-        Path(train_args.model_name_or_path)
-        if isinstance(train_args.model_name_or_path, str)
-        else train_args.model_name_or_path
-    )
-    repo_name = Path(repo_name) if isinstance(repo_name, str) else repo_name
-    run_name = train_args.run_name.replace("/", "_")
-
-    cache_dir = HF_DATASETS_CACHE / "preprocess_cache" / model_name_or_path.name / run_name / repo_name.name
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    map_cache = {split: (cache_dir / f"map_{data_name}-{split}_preprocessor.arrow").as_posix() for split in splits}
-
-    filter_cache = {}
-    for split in splits:
-        truncate_prefix = f"{truncate_map[split]}-" if split in truncate_map else ""
-        filter_cache[split] = (
-            cache_dir / f"filter_{truncate_prefix}{train_args.max_length}_{data_name}-{split}_preprocessor.arrow"
-        ).as_posix()
-
-    return map_cache, filter_cache
-
-
-def _load_repo_datasets(
-    repo_name: str,
-    train_args,
-    truncate_map: Dict[str, int],
-) -> Tuple[DatasetDict, str]:
+def _load_repo_datasets(repo_name: str, train_args, truncate_map: Dict[str, int]) -> Tuple[DatasetDict, str]:
     """
-    1. 로컬 경로 (디렉터리 자동감지 또는 data_files_map)
-    2. HuggingFace Hub 단일 subset
-    3. HuggingFace Hub 복수 subset (list) → subset별 truncate 후 split 단위로 병합
+    1. save_to_disk 로 저장된 로컬 데이터 (state.json / dataset_dict.json 존재)
+    2. 로컬 파일 (data_files_map)
+    3. HuggingFace Hub 단일 subset
+    4. HuggingFace Hub 복수 subset (list) → subset별 truncate 후 split 단위 병합
     """
-    if Path(repo_name).exists() and train_args.data_files_map:
+    truncate_map = truncate_map or {}
+    path = Path(repo_name)
+
+    if path.exists() and ((path / "state.json").exists() or (path / "dataset_dict.json").exists()):
+        return load_from_disk(repo_name), path.name
+
+    if path.exists() and train_args.data_files_map:
         data_files = train_args.data_files_map.get(repo_name)
-        datasets = load_dataset(repo_name, data_files=data_files)
-        data_name = Path(repo_name).name
-        return datasets, data_name
+        return load_dataset(repo_name, data_files=data_files), path.name
 
     raw_names = train_args.data_name_map.get(repo_name)
     data_names = raw_names if isinstance(raw_names, list) else [raw_names]
@@ -447,81 +336,131 @@ def _load_repo_datasets(
     if len(data_names) == 1:
         datasets = load_dataset(repo_name, data_names[0])
         data_name = str(data_names[0]) if data_names[0] is not None else ""
-    else:
-        loaded = [(load_dataset(repo_name, name), f"{repo_name}-{name}") for name in data_names]
+        return datasets, data_name
 
-        # subset별로 truncate 적용 후 병합
-        truncated = []
-        for subset_ds, name in loaded:
-            truncated_splits = {}
-            for split, dataset in subset_ds.items():
-                if name in truncate_map and len(dataset) > truncate_map[name]:
-                    dataset = dataset.select(range(truncate_map[name]))
-                truncated_splits[split] = dataset
-            truncated.append(DatasetDict(truncated_splits))
+    truncated = []
+    for name in data_names:
+        subset = load_dataset(repo_name, name)
+        key = f"{repo_name}-{name}"
+        if key in truncate_map:
+            n = truncate_map[key]
+            subset = DatasetDict(
+                {
+                    split: (d.shuffle(seed=train_args.seed).select(range(n)) if len(d) > n else d)
+                    for split, d in subset.items()
+                }
+            )
+        truncated.append(subset)
 
-        all_splits = set().union(*[ds.keys() for ds in truncated])
-        datasets = DatasetDict(
-            {split: concatenate_datasets([ds[split] for ds in truncated if split in ds]) for split in all_splits}
-        )
-        data_name = "+".join(str(n) for n in data_names)
+    all_splits = set().union(*[ds.keys() for ds in truncated])
+    datasets = DatasetDict(
+        {split: concatenate_datasets([ds[split] for ds in truncated if split in ds]) for split in all_splits}
+    )
+    return datasets, "+".join(str(n) for n in data_names)
 
-    return datasets, data_name
+
+def _get_cache_dir(train_args, repo_name, data_name, splits, truncate_map) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """map 캐시는 모델/repo에만 의존(max_length 미포함), filter 캐시는 max_length 포함.
+
+    → max_length 만 바꿔 재실험할 때 비싼 토큰화(map)는 재사용하고 filter만 다시 돈다.
+    명시적 캐시명을 쓰는 이유: train_args(accelerate 객체 포함)는 datasets fingerprint 해싱이
+    불안정해 random fingerprint 로 떨어지면 매 실행 재전처리되기 때문.
+    """
+    truncate_map = truncate_map or {}
+    model_name = Path(train_args.model_name_or_path).name
+    repo = Path(repo_name).name
+    run_name = train_args.run_name.replace("/", "_")
+
+    cache_dir = HF_DATASETS_CACHE / "preprocess_cache" / model_name / run_name / repo
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    map_cache = {split: (cache_dir / f"map_{data_name}-{split}_preprocessor.arrow").as_posix() for split in splits}
+
+    filter_cache = {}
+    for split in splits:
+        prefix = f"{truncate_map[split]}-" if split in truncate_map else ""
+        filter_cache[split] = (
+            cache_dir / f"filter_{prefix}{train_args.max_length}_{data_name}-{split}_preprocessor.arrow"
+        ).as_posix()
+
+    return map_cache, filter_cache
+
+
+def _cache_exists(cache_file_names: Dict[str, str]) -> bool:
+    """datasets 내부(`glob.iglob(prefix*ext)`)와 동일한 방식으로 캐시(샤드 포함) 존재를 확인.
+
+    수동으로 `_{rank:05d}_of_{num_proc:05d}` 를 세지 않으므로 num_proc 가 바뀌어도 견고하다.
+    오직 '첫 실행만 main_process_first' 결정을 위해서만 사용된다 (캐시 로드는 datasets가 담당).
+    """
+    if not cache_file_names:
+        return False
+    for path in cache_file_names.values():
+        base, ext = os.path.splitext(path)
+        if not glob.glob(f"{base}*{ext}"):
+            return False
+    return True
+
+
+def _role_of(prefix: Dict[str, list], split_key: str) -> str | None:
+    for role, splits in prefix.items():
+        if split_key in splits:
+            return role
+    return None
+
+
+def _merge_datasets(dataset_list: List[Dataset], name: str, packing: bool) -> Dataset | None:
+    if not dataset_list:
+        return None
+    combined = concatenate_datasets(dataset_list)
+    if not packing:
+        combined.set_format("pt")
+    return combined
+
+
+def _pack(dataset: Dataset, train_args, desc: str) -> Dataset:
+    dataset = dataset.remove_columns(train_args.length_column_name)
+    dataset = pack_dataset(dataset, train_args.max_length, train_args.packing_strategy, {"desc": desc})
+    dataset = dataset.rename_column("seq_lengths", train_args.length_column_name)
+    dataset.set_format("pt")
+    return dataset
 
 
 def processing_datasets(
-    train_args: SFTScriptArguments, tokenizer: PreTrainedTokenizer
+    train_args: "SFTScriptArguments",
+    tokenizer: PreTrainedTokenizer,
 ) -> Tuple[Dataset | None, Dataset | None, Dataset | None]:
-    def merge_datasets(dataset_list: List[Dataset], name: str) -> Dataset:
-        if not dataset_list:
-            return None
-        combined = concatenate_datasets(dataset_list)
-        None if train_args.packing else combined.set_format("pt")
-        if is_main:
-            logger.info(f"{name}_dataset:\n{combined}")
-        return combined
-
     if train_args.data_preprocessor_type not in PROCESSOR_REGISTRY:
         raise ValueError(f"알 수 없는 데이터 프로세서 타입: {train_args.data_preprocessor_type}")
 
     func = PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
-
-    start_time = time.time()
     is_main = train_args.distributed_state.is_local_main_process
+    start_time = time.time()
 
-    datasets_by_split = {"train": [], "valid": [], "test": []}
+    buckets = {"train": [], "valid": [], "test": []}
 
     for repo_name in train_args.dataset_repo_ls:
         if is_main:
             logger.info(f"Loading {repo_name}")
 
-        # 데이터셋 로드 (로컬 / Hub 단일·복수 subset 통합 처리)
-        truncate_map = train_args.data_truncate_map.get(repo_name)
+        truncate_map = train_args.data_truncate_map.get(repo_name) or {}
         datasets, data_name = _load_repo_datasets(repo_name, train_args, truncate_map)
 
-        # 필요한 split만 유지
-        all_prefixes = sum(train_args.dataset_prefix.values(), [])
-        datasets = DatasetDict({k: v for k, v in datasets.items() if k in all_prefixes})
+        prefix = train_args.dataset_prefix.get(repo_name, train_args.dataset_prefix.get("default", {}))
+        wanted_splits = sum(prefix.values(), [])
+        datasets = DatasetDict({k: v for k, v in datasets.items() if k in wanted_splits})
 
-        # 캐시 파일명 생성
         map_cache, filter_cache = _get_cache_dir(train_args, repo_name, data_name, datasets.keys(), truncate_map)
-
-        cache_exists = check_dataset_cache_exists(
-            map_cache=map_cache,
-            num_proc=train_args.preprocessing_num_workers,
-            filter_cache=filter_cache,
-            train_split_keys=train_args.dataset_prefix.get("train", []),
-        )
-        use_main_process_first = not cache_exists
+        use_main_process_first = not _cache_exists(map_cache)
 
         if is_main:
-            logger.info(f"{repo_name}: cache_exists={cache_exists}, use_main_process_first={use_main_process_first}")
+            logger.info(f"{repo_name}: cache_exists={not use_main_process_first}")
 
-        with (
+        context = (
             train_args.main_process_first(desc=f"preprocessing-{repo_name}")
             if use_main_process_first
             else nullcontext()
-        ):
+        )
+        with context:
             datasets = datasets.map(
                 func,
                 num_proc=train_args.preprocessing_num_workers,
@@ -530,73 +469,45 @@ def processing_datasets(
                 batched=True,
                 batch_size=train_args.preprocessing_batch_size,
                 cache_file_names=map_cache,
-                remove_columns=set(sum(datasets.column_names.values(), [])),
+                remove_columns=list(set(sum(datasets.column_names.values(), []))),
                 desc=f"preprocess-{repo_name}",
                 fn_kwargs={"tokenizer": tokenizer, "args": train_args},
             )
 
             for split_key, dataset in datasets.items():
-                if split_key in truncate_map:
-                    truncate_size = truncate_map[split_key]
-                    if len(dataset) > truncate_size:
-                        dataset = dataset.shuffle().select(range(truncate_size))
-                    elif is_main:
-                        logger.info(f"{repo_name}/{split_key}: 크기 {len(dataset)} <= truncate {truncate_size}")
+                role = _role_of(prefix, split_key)
+                if role is None:
+                    continue
 
-                if split_key in train_args.dataset_prefix["train"] and train_args.do_train:
+                if split_key in truncate_map and len(dataset) > truncate_map[split_key]:
+                    dataset = dataset.shuffle(seed=train_args.seed).select(range(truncate_map[split_key]))
+
+                if role == "train" and train_args.do_train:
                     dataset = dataset.filter(
-                        lambda lengths: [l <= train_args.max_length for l in lengths],
+                        lambda lengths: [length <= train_args.max_length for length in lengths],
                         num_proc=train_args.preprocessing_num_workers,
                         input_columns=[train_args.length_column_name],
-                        cache_file_name=filter_cache[split_key] if filter_cache else None,
+                        cache_file_name=filter_cache.get(split_key),
                         load_from_cache_file=True,
                         batched=True,
                         batch_size=train_args.preprocessing_batch_size,
                         desc=f"filter-{repo_name}/{split_key}",
                     )
 
-                for split_type, prefixes in train_args.dataset_prefix.items():
-                    original_split_type = split_type  # "train", "valid", "test"
-                    split_type = "predict" if split_type == "test" else split_type
-                    if split_key in prefixes:
-                        repo_allowed = train_args.data_split_map.get(repo_name)
-                        if repo_allowed is not None and original_split_type not in repo_allowed:
-                            continue
+                if getattr(train_args, _DO_FLAG[role]):
+                    buckets[role].append(dataset)
 
-                        do_flag = getattr(
-                            train_args,
-                            f"do_{split_type if split_type != 'valid' else 'eval'}",
-                        )
-                        if do_flag:
-                            datasets_by_split[split_type].append(dataset)
-
-    train_dataset = merge_datasets(datasets_by_split["train"], "train")
-    valid_dataset = merge_datasets(datasets_by_split["valid"], "valid")
-    test_dataset = merge_datasets(datasets_by_split["test"], "test")
+    train_dataset = _merge_datasets(buckets["train"], "train", train_args.packing)
+    valid_dataset = _merge_datasets(buckets["valid"], "valid", train_args.packing)
+    test_dataset = _merge_datasets(buckets["test"], "test", train_args.packing)
 
     if is_main:
         logger.info(f"load_dataset_time: {time.time() - start_time:.2f}s")
 
-    if train_dataset and train_args.packing:
-        train_dataset = train_dataset.remove_columns("length")
-        train_dataset = pack_dataset(
-            train_dataset,
-            train_args.max_length,
-            train_args.packing_strategy,
-            {"desc": "Packing dataset"},
-        )
-        train_dataset = train_dataset.rename_column("seq_lengths", train_args.length_column_name)
-        train_dataset.set_format("pt")
+    if train_dataset is not None and train_args.packing:
+        train_dataset = _pack(train_dataset, train_args, "Packing dataset")
 
-    if valid_dataset and train_args.packing and train_args.eval_packing:
-        valid_dataset = valid_dataset.remove_columns("length")
-        valid_dataset = pack_dataset(
-            valid_dataset,
-            train_args.max_length,
-            train_args.packing_strategy,
-            {"desc": "Packing eval dataset"},
-        )
-        valid_dataset = valid_dataset.rename_column("seq_lengths", train_args.length_column_name)
-        valid_dataset.set_format("pt")
+    if valid_dataset is not None and train_args.packing and train_args.eval_packing:
+        valid_dataset = _pack(valid_dataset, train_args, "Packing eval dataset")
 
     return train_dataset, valid_dataset, test_dataset

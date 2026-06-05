@@ -1,8 +1,8 @@
 import inspect
 import logging
 import sys
-from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Union
 
 import datasets
@@ -42,7 +42,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         "data_name_map",
         "dataset_prefix",
         "data_files_map",
-        "data_split_map",
         "config_kwargs",
         "tokenizer_kwargs",
         "lora_kwargs",
@@ -70,9 +69,10 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         metadata={"help": "데이터 전처리 시 사용할 배치 크기를 설정하는 값."},
     )
     dataset_prefix: dict = field(
-        default_factory=lambda: defaultdict(list),
+        default_factory=dict,
         metadata={
-            "help": "데이터셋 로드 시 학습, 검증, 테스트 데이터를 구분하기 위해 사용되는 접두어 딕셔너리. 각 키는 'train', 'valid', 'test'로 구성된다."
+            "help": "repo별 split→역할 매핑. {repo_or_'default': {'train': [split...], 'valid': [...], 'test': [...]}} 형태. "
+            "특정 repo만 일부 역할에 기여시키려면 해당 repo 키에 train을 빼면 된다(기존 data_split_map 통합)."
         },
     )
     data_truncate_map: Union[dict, str] | None = field(
@@ -87,22 +87,10 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
             "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'data_config_name'}. 데이터셋 로드 시 사용된다."
         },
     )
-    data_split_map: Union[dict, str] | None = field(
-        default_factory=dict,
-        metadata={
-            "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'train'}. 데이터셋 로드 시 사용된다."
-        },
-    )
     data_files_map: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={
             "help": "local에서 데이터를 불러올 때 {'train': 'train_file_path', 'validation': 'validation_file_path', 'test': 'test_file_path'} 형태로 데이터 파일 경로를 매핑하기 위한 맵. 데이터셋 로드 시 사용된다."
-        },
-    )
-    data_split_map: Union[dict, str] | None = field(
-        default_factory=dict,
-        metadata={
-            "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'train'}. 데이터셋 로드 시 사용된다."
         },
     )
 
@@ -380,6 +368,7 @@ logger = hf_logging.get_logger("transformers")
 
 
 def main(train_args: SFTScriptArguments) -> None:
+    # ── 공통: processor / config / dataset ──────────────────────────────────
     try:
         processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     except OSError:
@@ -389,12 +378,10 @@ def main(train_args: SFTScriptArguments) -> None:
 
     train_dataset, valid_dataset, test_dataset = processing_datasets(train_args, processor)
 
-    # 학습에 활용할 값들을 로딩
-    model_kwargs = {"config": config, **train_args.model_init_kwargs}
+    model_kwargs = {"config": config, **(train_args.model_init_kwargs or {})}
     architecture = getattr(transformers, config.architectures[0].replace("FSDP", ""))
     model = architecture.from_pretrained(train_args.model_name_or_path, **model_kwargs).train()
     model.use_cache = False if train_args.gradient_checkpointing else True
-    logger.info(f"Model parameter count: {get_model_param_count(model)}")
 
     # FSDP에서 model에 존재하지 않는 모듈이 있는 경우 애러가 발생하기 때문에 _no_split_modules을 필터링 한다.
     exist_module = {module.__class__.__name__ for module in model.modules()}
@@ -407,6 +394,7 @@ def main(train_args: SFTScriptArguments) -> None:
             mode=train_args.torch_compile_mode,
             fullgraph=True,
         )
+    logger.info(f"Model parameter count: {get_model_param_count(model)}")
 
     collator = PackingCollatorForLLM(
         args=train_args,
@@ -417,7 +405,7 @@ def main(train_args: SFTScriptArguments) -> None:
 
     # processing_datasets에서 이미 패킹이 적용되었기 때문에 False로 설정
     setattr(train_args, "packing", False)
-    # 이미 초기화 했기 때문에 model_SFTTrainer에서 모델 초기화 방식을 사용하지 않도록 설정
+    # 이미 초기화 했기 때문에 SFTTrainer에서 모델 초기화 방식을 사용하지 않도록 설정
     setattr(train_args, "model_init_kwargs", None)
     # 데이터셋 준비 단계를 건너뛰도록 설정
     train_args.dataset_kwargs = {"skip_prepare_dataset": True}
@@ -431,6 +419,7 @@ def main(train_args: SFTScriptArguments) -> None:
         args=train_args,
         peft_config=get_peft_config(train_args),
     )
+
     if train_args.eval_harness_tasks is not None:
         from callbacks import EvalHarnessCallBack
 
@@ -444,6 +433,12 @@ def main(train_args: SFTScriptArguments) -> None:
                 eval_batch_size=train_args.eval_batch_size,
             )
         )
+
+    if "wandb" in (train_args.report_to or []):
+        from callbacks import WandbCodeArtifactCallback
+
+        repo_root = Path(__file__).resolve().parents[2]
+        trainer.add_callback(WandbCodeArtifactCallback(root=repo_root.as_posix()))
 
     if train_args.do_train and train_dataset:
         train(trainer, train_args)

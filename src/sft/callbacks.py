@@ -1,10 +1,13 @@
+import os
 from collections import defaultdict
 from copy import deepcopy
+from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import lm_eval
 import torch
 import torch.distributed as dist
+import wandb
 from accelerate import Accelerator
 from accelerate.utils.memory import release_memory
 from lm_eval.api.model import TemplateLM
@@ -371,3 +374,58 @@ class EvalHarnessCallBack(TrainerCallback):
 
         lm = release_memory(lm)
         outputs = release_memory(outputs)
+
+
+class WandbCodeArtifactCallback(TrainerCallback):
+    def __init__(
+        self,
+        root: str,
+        include_dirs=("src/sft", "run_scripts", "config"),
+        include_files=("pyproject.toml", "uv.lock", "run_train.sh", "Dockerfile", "docker-compose.yml"),
+        name: str = "train_code",
+        exclude_suffix=(".pyc", ".log", ".arrow", ".bin", ".safetensors"),
+        exclude_parts=("__pycache__", ".venv", "wandb", "logs", ".git"),
+    ) -> None:
+        self.root = Path(root)
+        self.include_dirs = include_dirs
+        self.include_files = include_files
+        self.name = name
+        self.exclude_suffix = set(exclude_suffix)
+        self.exclude_parts = set(exclude_parts)
+        self._done = False
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        # Trainer 의 WandbCallback 이 wandb.init() 을 호출한 직후 실행됨
+        if self._done or not state.is_world_process_zero or wandb.run is None:
+            return
+
+        commit = os.environ.get("WANDB_GIT_COMMIT", "")
+        artifact = wandb.Artifact(
+            name=self.name,
+            type="code",
+            description=f"학습 코드 스냅샷 (run={wandb.run.name}, commit={commit})",
+            metadata={"git_commit": commit, "run_id": wandb.run.id},
+        )
+
+        count = 0
+        for directory in self.include_dirs:
+            base = self.root / directory
+            if not base.exists():
+                continue
+            for file in sorted(base.rglob("*")):
+                if not file.is_file():
+                    continue
+                if file.suffix in self.exclude_suffix or any(p in file.parts for p in self.exclude_parts):
+                    continue
+                artifact.add_file(str(file), name=str(file.relative_to(self.root)))
+                count += 1
+
+        for filename in self.include_files:
+            path = self.root / filename
+            if path.exists():
+                artifact.add_file(str(path), name=filename)
+                count += 1
+
+        wandb.run.log_artifact(artifact)
+        print(f"[WandbCodeArtifactCallback] code artifact '{self.name}' 업로드: {count} files")
+        self._done = True

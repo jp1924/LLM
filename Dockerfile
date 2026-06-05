@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04
+FROM nvcr.io/nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 WORKDIR /root
 USER root
@@ -35,12 +35,11 @@ ENV PATH="/root/.local/bin/:$PATH"
 # clear를 종종 한국어 '칟ㅁㄱ'로 치는 일이 종종 있어서 추가함.
 RUN echo "alias '칟ㅁㄱ'='clear'" >> /root/.bashrc
 
-# install python packages
-RUN uv pip install -U pip wheel setuptools debugpy pydevd
-RUN uv pip install transformers accelerate datasets liger-kernel trl peft deepspeed lomo-optim apollo-torch transformer_engine[pytorch] evaluate \
-    bitsandbytes scipy sentencepiece pillow fastapi uvicorn ruff natsort setproctitle glances[gpu] wandb cmake latex2sympy2_extended math_verify pytest openai koreanize_matplotlib
-
-RUN uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+# install python packages (uv 로 pyproject.toml + uv.lock 기반 동기화)
+WORKDIR /root/workspace
+COPY pyproject.toml uv.lock /root/workspace/
+RUN uv sync --frozen --inexact
+# flash-attn 은 torch 설치 후 빌드해야 하므로 별도 설치
 RUN uv pip install flash_attn --no-build-isolation
-RUN uv pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@cab12a47fbc159334f9cb53ca046b7d65e8b43e0
+WORKDIR /root
     
