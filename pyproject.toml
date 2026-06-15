@@ -8,7 +8,6 @@ dependencies = [
     # 핵심 라이브러리
     "transformers", "accelerate", "datasets", "liger-kernel",
     "trl", "peft", "deepspeed", "lomo-optim", "apollo-torch",
-    "transformer_engine[pytorch]",
 
     # 평가 / 실험
     "evaluate", "pytest", "openai",

@@ -1,0 +1,70 @@
+model_name_or_path: "google/gemma-4-31B-it"
+
+
+dataset_type: "dpo"
+dataset_repo_ls:
+  - "dpo_train"
+dataset_prefix:
+  default:
+    train:
+      - train
+dataset_truncate_map:
+  "dpo_train":
+    train: 200
+dataset_num_proc: 16
+dataset_batch_size: 1000
+max_length: 4096
+
+
+use_prefix_packing: true
+
+
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 1
+max_steps: 10
+num_train_epochs: 1
+do_train: true
+do_eval: false
+do_predict: false
+
+
+beta: 0.1
+loss_type: sigmoid
+
+
+learning_rate: 5.0e-6
+lr_scheduler_type: cosine
+warmup_ratio: 0.0
+max_grad_norm: 1.0
+weight_decay: 0
+optim: adamw_bnb_8bit
+
+
+eval_strategy: 'no'
+save_strategy: 'no'
+
+
+bf16: true
+tf32: true
+dtype: bfloat16
+use_liger_kernel: false
+torch_compile: false
+attn_implementation: sdpa
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+dataloader_num_workers: 2
+packing: true
+eval_packing: false
+remove_unused_columns: false
+ddp_timeout: 18000000
+seed: 42
+run_name: "dpo-smoke-gemma4-31b"
+
+
+report_to: 'none'
+logging_strategy: 'steps'
+logging_steps: 1
+
+
+use_peft: false

@@ -1,4 +1,3 @@
-import inspect
 import logging
 import sys
 from dataclasses import dataclass, field
@@ -6,7 +5,6 @@ from pathlib import Path
 from typing import List, Union
 
 import datasets
-import optimization
 import torch
 from accelerate import DataLoaderConfiguration, ParallelismConfig
 from datasets import Dataset
@@ -27,21 +25,21 @@ from transformers import logging as hf_logging
 from transformers.data.data_collator import DataCollatorMixin
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.trainer_pt_utils import get_model_param_count
-from transformers.utils import is_peft_available
+
+from ..adepters import get_peft_config
 
 
-if is_peft_available():
-    from peft import LoraConfig, PeftConfig
+logger = hf_logging.get_logger("transformers")
 
 
 # TrainingArguments, ModelArguments, DataArguments 이런식으로 나누면, args관리하기도 어렵고, wandb에는 TrainingArguments만 기록되는 문제가 있기 때문에 이런식으로 상속받아서 하나의 train_args에서 모든 것을 처리할 수 있게 만들었음.
 @dataclass
 class SFTScriptArguments(SFTConfig, ModelConfig):
     _VALID_DICT_FIELDS = SFTConfig._VALID_DICT_FIELDS + [
-        "data_truncate_map",
-        "data_name_map",
+        "dataset_truncate_map",
+        "dataset_name_map",
         "dataset_prefix",
-        "data_files_map",
+        "dataset_files_map",
         "config_kwargs",
         "tokenizer_kwargs",
         "lora_kwargs",
@@ -54,17 +52,13 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
         },
     )
     data_preprocessor_type: str = field(
-        default_factory=lambda: PROCESSOR_REGISTRY.keys(),
+        default="sft",
         metadata={
             "help": f"학습할 데이터의 전처리를 어떻게 할지 결정하는 값. {', '.join(PROCESSOR_REGISTRY.keys())} 중 하나여야 한다.",
-            "choices": PROCESSOR_REGISTRY.keys(),
+            "choices": list(PROCESSOR_REGISTRY.keys()),
         },
     )
-    preprocessing_num_workers: int = field(
-        default=5,
-        metadata={"help": "데이터 전처리에 활용할 프로세스의 수, 1 이면 싱글 프로세스로 동작한다."},
-    )
-    preprocessing_batch_size: int = field(
+    dataset_batch_size: int = field(
         default=1000,
         metadata={"help": "데이터 전처리 시 사용할 배치 크기를 설정하는 값."},
     )
@@ -75,19 +69,19 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
             "특정 repo만 일부 역할에 기여시키려면 해당 repo 키에 train을 빼면 된다(기존 data_split_map 통합)."
         },
     )
-    data_truncate_map: Union[dict, str] | None = field(
+    dataset_truncate_map: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={
             "help": "데이터의 샘플 개수를 조절하기 위한 맵. 예: {'repo_name': {'train': 3000, 'validation': 1500}}. 데이터셋 처리 시 활용된다. subset 단위로 자르고 싶을 때는 {'repo_name-subset_name': 5000} 형태로 입력하면 된다."
         },
     )
-    data_name_map: Union[dict, str] | None = field(
+    dataset_name_map: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={
             "help": "데이터셋의 구성 이름을 매핑하기 위한 맵. 예: {'repo_name': 'data_config_name'}. 데이터셋 로드 시 사용된다."
         },
     )
-    data_files_map: Union[dict, str] | None = field(
+    dataset_files_map: Union[dict, str] | None = field(
         default_factory=dict,
         metadata={
             "help": "local에서 데이터를 불러올 때 {'train': 'train_file_path', 'validation': 'validation_file_path', 'test': 'test_file_path'} 형태로 데이터 파일 경로를 매핑하기 위한 맵. 데이터셋 로드 시 사용된다."
@@ -95,8 +89,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     )
 
     # -------------------------- Training Args ------------------------- #
-
-    lr_scheduler_type: Union[optimization.NewSchedulerType, str] = field(default="linear")
 
     chat_template: str = field(
         default=None,
@@ -124,6 +116,10 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     eval_harness_tasks: List[str] = field(
         default=None,
         metadata={"help": "평가에 활용할 lm-eval-harness의 태스크 리스트."},
+    )
+    gpu_mem_check: bool = field(
+        default=False,
+        metadata={"help": "forward/backward/optimizer step 구간별 GPU peak memory 를 logging 한다."},
     )
 
     def __post_init__(self) -> None:
@@ -324,49 +320,6 @@ class PackingCollatorForLLM(DataCollatorMixin):
         return BatchFeature(batch, self.return_tensors)
 
 
-def get_peft_config(train_args: SFTScriptArguments) -> "PeftConfig | None":
-    is_main = train_args.distributed_state.is_local_main_process
-    if train_args.use_peft is False:
-        return None
-
-    if not is_peft_available():
-        raise ValueError(
-            "You need to have PEFT library installed in your environment, make sure to install `peft`. "
-            "Make sure to run `pip install -U peft`."
-        )
-
-    lora_kwargs = getattr(train_args, "lora_kwargs", {})
-    if lora_kwargs:
-        signature = inspect.signature(LoraConfig.__init__)
-        for key in lora_kwargs.keys():
-            if key not in signature.parameters:
-                raise ValueError(
-                    f"Invalid LoraConfig argument: {key}. Valid arguments are: {list(signature.parameters.keys())}"
-                )
-
-    peft_config = LoraConfig(
-        task_type=train_args.lora_task_type,
-        r=train_args.lora_r,
-        target_modules=train_args.lora_target_modules,
-        target_parameters=train_args.lora_target_parameters,
-        lora_alpha=train_args.lora_alpha,
-        lora_dropout=train_args.lora_dropout,
-        bias="none",
-        use_rslora=train_args.use_rslora,
-        use_dora=train_args.use_dora,
-        modules_to_save=train_args.lora_modules_to_save,
-        **lora_kwargs,
-    )
-
-    if is_main:
-        logger.info(f"PEFT config: {peft_config}")
-
-    return peft_config
-
-
-logger = hf_logging.get_logger("transformers")
-
-
 def main(train_args: SFTScriptArguments) -> None:
     # ── 공통: processor / config / dataset ──────────────────────────────────
     try:
@@ -403,12 +356,10 @@ def main(train_args: SFTScriptArguments) -> None:
         sample_dataset=train_dataset or valid_dataset or test_dataset,
     )
 
-    # processing_datasets에서 이미 패킹이 적용되었기 때문에 False로 설정
-    setattr(train_args, "packing", False)
-    # 이미 초기화 했기 때문에 SFTTrainer에서 모델 초기화 방식을 사용하지 않도록 설정
-    setattr(train_args, "model_init_kwargs", None)
-    # 데이터셋 준비 단계를 건너뛰도록 설정
-    train_args.dataset_kwargs = {"skip_prepare_dataset": True}
+    train_args.packing = False  # processing_datasets에서 이미 패킹이 적용되었기 때문에 False로 설정
+    train_args.eval_packing = False  # 이미 초기화 했기 때문에 SFTTrainer에서 모델 초기화 방식을 사용하지 않도록 설정
+    train_args.dataset_kwargs = {"skip_prepare_dataset": True}  # 데이터셋 준비 단계를 건너뛰도록 설정
+    train_args.model_init_kwargs = None
 
     trainer = SFTTrainer(
         model=model,
@@ -433,12 +384,21 @@ def main(train_args: SFTScriptArguments) -> None:
                 eval_batch_size=train_args.eval_batch_size,
             )
         )
+    if train_args.gpu_mem_check:
+        from callbacks import GpuMemoryCallback
+
+        trainer.add_callback(GpuMemoryCallback())
 
     if "wandb" in (train_args.report_to or []):
         from callbacks import WandbCodeArtifactCallback
 
         repo_root = Path(__file__).resolve().parents[2]
-        trainer.add_callback(WandbCodeArtifactCallback(root=repo_root.as_posix()))
+        trainer.add_callback(
+            WandbCodeArtifactCallback(
+                root=repo_root.as_posix(),
+                include_dirs=("src/sft", "scripts", "config"),
+            )
+        )
 
     if train_args.do_train and train_dataset:
         train(trainer, train_args)

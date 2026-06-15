@@ -429,3 +429,136 @@ class WandbCodeArtifactCallback(TrainerCallback):
         wandb.run.log_artifact(artifact)
         print(f"[WandbCodeArtifactCallback] code artifact '{self.name}' 업로드: {count} files")
         self._done = True
+
+
+class GpuMemoryCallback(TrainerCallback):
+    """forward / backward / optimizer step 구간별 GPU peak memory 측정 콜백.
+
+    측정 원리
+    ---------
+    - forward  : 모델에 forward_pre_hook / forward_hook 을 걸어, 두 훅 사이의
+                 `torch.cuda.max_memory_allocated()` 를 forward peak 으로 본다.
+    - backward : forward_hook 직후 peak 통계를 reset 하고, 최상위 모듈의
+                 full_backward_hook 시점의 peak 을 backward peak 으로 본다.
+                 (최상위 모듈의 backward hook 은 backward 의 가장 마지막에 호출됨)
+    - optimizer: on_pre_optimizer_step 에서 reset, on_optimizer_step 에서 peak 측정.
+
+    gradient accumulation 으로 한 step 안에서 forward/backward 가 여러 번
+    호출되면, 그 step 의 '최댓값' 을 기록한다.
+
+    멀티 GPU 면 각 rank 가 자신의 device 를 측정하고, 기본적으로 모든 rank 의
+    최댓값(all_reduce MAX)을 main process 에서 로깅한다.
+    """
+
+    def __init__(self, logging_steps: Optional[int] = None, reduce_across_ranks: bool = True):
+        self.logging_steps = logging_steps
+        self.reduce_across_ranks = reduce_across_ranks
+        self._handles = []
+
+        # 한 step 내 누적 최댓값 (bytes)
+        self._fwd_peak = 0
+        self._bwd_peak = 0
+        self._opt_peak = 0
+        self._measuring_backward = False
+
+    # --------------------------- 내부 유틸 --------------------------- #
+    @staticmethod
+    def _reset_peak():
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+    @staticmethod
+    def _peak() -> int:
+        if torch.cuda.is_available():
+            return torch.cuda.max_memory_allocated()
+        return 0
+
+    def _register_hooks(self, model):
+        if not torch.cuda.is_available() or self._handles:
+            return
+
+        def forward_pre_hook(module, inputs):
+            # forward 시작 → forward 구간 측정을 위해 peak reset
+            self._reset_peak()
+
+        def forward_hook(module, inputs, output):
+            # forward 종료 → forward peak 확정 후 backward 측정을 위해 reset
+            self._fwd_peak = max(self._fwd_peak, self._peak())
+            self._reset_peak()
+            self._measuring_backward = True
+
+        def full_backward_hook(module, grad_input, grad_output):
+            # 최상위 모듈 backward hook = backward 의 마지막 → backward peak 확정
+            if self._measuring_backward:
+                self._bwd_peak = max(self._bwd_peak, self._peak())
+                self._measuring_backward = False
+
+        self._handles.append(model.register_forward_pre_hook(forward_pre_hook))
+        self._handles.append(model.register_forward_hook(forward_hook))
+        self._handles.append(model.register_full_backward_hook(full_backward_hook))
+
+    def _gb(self, value_bytes: int) -> float:
+        return value_bytes / (1024**3)
+
+    def _reduce_max_with_rank(self, value_bytes: int) -> Tuple[int, int]:
+        """전 rank 중 최댓값과 그 값을 가진 rank 를 반환. (단일 GPU 면 (value, 0))"""
+        if not (self.reduce_across_ranks and dist.is_initialized() and dist.get_world_size() > 1):
+            return value_bytes, 0
+        device = torch.cuda.current_device() if torch.cuda.is_available() else None
+        rank = dist.get_rank()
+        # (value, rank) 쌍을 MAXIMUM 으로 reduce → value 가 같으면 rank 큰 쪽 선택
+        pair = torch.tensor([value_bytes, rank], dtype=torch.long, device=device)
+        gathered = [torch.zeros_like(pair) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered, pair)
+        best = max(gathered, key=lambda t: int(t[0].item()))
+        return int(best[0].item()), int(best[1].item())
+
+    # --------------------------- 콜백 훅 --------------------------- #
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if self.logging_steps is None:
+            self.logging_steps = max(int(getattr(args, "logging_steps", 1) or 1), 1)
+        if model is not None:
+            self._register_hooks(model)
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        # 새 step 시작 → 누적 최댓값 초기화
+        self._fwd_peak = 0
+        self._bwd_peak = 0
+        self._opt_peak = 0
+        self._measuring_backward = False
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        self._reset_peak()
+
+    def on_optimizer_step(self, args, state, control, **kwargs):
+        self._opt_peak = max(self._opt_peak, self._peak())
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not torch.cuda.is_available():
+            return
+        if self.logging_steps and state.global_step % self.logging_steps != 0:
+            return
+
+        # 각 구간별로 전 GPU 중 '가장 높은 peak' 와 그 rank 를 함께 구한다.
+        fwd, fwd_rank = self._reduce_max_with_rank(self._fwd_peak)
+        bwd, bwd_rank = self._reduce_max_with_rank(self._bwd_peak)
+        opt, opt_rank = self._reduce_max_with_rank(self._opt_peak)
+        step_peak, step_rank = self._reduce_max_with_rank(max(self._fwd_peak, self._bwd_peak, self._opt_peak))
+        reserved, reserved_rank = self._reduce_max_with_rank(torch.cuda.max_memory_reserved())
+
+        if state.is_world_process_zero:
+            logger.info(
+                f"[GPU MEM] step={state.global_step} "
+                f"forward={self._gb(fwd):.3f}GB(rank{fwd_rank}) "
+                f"backward={self._gb(bwd):.3f}GB(rank{bwd_rank}) "
+                f"optimizer={self._gb(opt):.3f}GB(rank{opt_rank}) "
+                f"step_peak={self._gb(step_peak):.3f}GB(rank{step_rank}) "
+                f"reserved={self._gb(reserved):.3f}GB(rank{reserved_rank})"
+            )
+        # 다음 logging 윈도우를 위해 reserved peak 통계 초기화
+        torch.cuda.reset_peak_memory_stats()
+
+    def on_train_end(self, args, state, control, **kwargs):
+        for handle in self._handles:
+            handle.remove()
+        self._handles = []
