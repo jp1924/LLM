@@ -51,3 +51,29 @@ torchaudio  = { index = "pytorch-cu128" }
 name     = "pytorch-cu128"
 url      = "https://download.pytorch.org/whl/cu128"
 explicit = true # 이 인덱스는 명시된 패키지에만 사용
+
+# copied from transformers
+line-length = 119
+extend-include = ["*.ipynb"]
+
+[lint]
+# Never enforce `E501` (line length violations).
+ignore = ["C901", "E501", "E741", "F402", "F823", "C408"]
+select = ["C", "E", "F", "I", "W"]
+
+[lint.isort]
+lines-after-imports = 2
+known-first-party = ["transformers"]
+
+[format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"

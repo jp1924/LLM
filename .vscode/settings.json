@@ -23,7 +23,9 @@
     },
     "editor.minimap.renderCharacters": false,
     "editor.minimap.enabled": false,
-    "ruff.configuration": "/root/workspace/ruff.toml",
+    // Git 소스 제어 변경 목록을 폴더 트리 구조로 표시
+    "scm.defaultViewMode": "tree",
+    "ruff.configuration": "/root/workspace/pyproject.toml",
     "files.refactoring.autoSave": true,
     "ruff.lint.preview": true,
     "ruff.lint.enable": true,
@@ -54,10 +56,4 @@
     "[json]": {
         "editor.defaultFormatter": "vscode.json-language-features"
     },
-    "chat.tools.terminal.autoApprove": {
-        "/^cd /root && python -c \"\nfrom transformers import AutoModel\nfrom transformers\\.models\\.hyperclovax_vision\\.configuration_hyperclovax_vision import HyperClovaXConfig\ncfg = HyperClovaXConfig\\(\\)\nmodel = AutoModel\\.from_config\\(cfg\\)\nprint\\(type\\(model\\)\\)\nprint\\('OK'\\)\n\"$/": {
-            "approve": true,
-            "matchCommandLine": true
-        }
-    }
 }
