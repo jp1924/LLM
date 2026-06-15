@@ -9,16 +9,6 @@ env:
   TORCHDYNAMO_DISABLE: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,roundup_power2_divisions:[32:256,64:128,256:64,>:32]"
   CUDA_DEVICE_ORDER: 'PCI_BUS_ID'
-  # accelerate
-  # accelerate launch의 config_file로 하지 않는 이유,
-  # 이유가 밝혀지지 않았는데 launch로 수행하니깐 FSDP가 정상적으로 동작하지 않아서 일단 이렇게 사용하는 중
-  ACCELERATE_USE_FSDP: 'true'
-  FSDP_VERSION: 2
-  FSDP_RESHARD_AFTER_FORWARD: 'true'
-  FSDP_STATE_DICT_TYPE: "FULL_STATE_DICT"
-  FSDP_AUTO_WRAP_POLICY: "TRANSFORMER_BASED_WRAP"
-  FSDP_CPU_RAM_EFFICIENT_LOADING: 'false'
-  FSDP_ACTIVATION_CHECKPOINTING: 'false'
 output_dir: "/root/output_dir/gemma-3-1b-pt/NationalCorpus"
 cache_dir: "/root/.cache/.[gemma-3-1b-pt]preprocess/NationalCorpus"
 model_name_or_path: 'google/gemma-3-1b-pt'

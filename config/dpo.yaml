@@ -3,13 +3,13 @@ model_name_or_path: "google/gemma-4-31B-it"
 
 dataset_type: "dpo"
 dataset_repo_ls:
-  - "dpo_train"
+  - "HuggingFaceH4/ultrafeedback_binarized"
 dataset_prefix:
   default:
     train:
       - train
 dataset_truncate_map:
-  "dpo_train":
+  "HuggingFaceH4/ultrafeedback_binarized":
     train: 200
 dataset_num_proc: 16
 dataset_batch_size: 1000
