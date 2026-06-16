@@ -206,6 +206,8 @@ def main(train_args: DPOScriptArguments) -> None:
     train_args.eval_packing = False  # 이미 초기화 했기 때문에 SFTTrainer에서 모델 초기화 방식을 사용하지 않도록 설정
     train_args.model_init_kwargs = None
 
+    # packing=False 면 순수 TRL DPOTrainer(conversational 데이터를 직접 토큰화/처리),
+    # packing=True 면 PackingDPOTrainer(_pack 가 만든 packed input_ids 를 커스텀 collator 로 소비).
     trainer_cls = PackingDPOTrainer if train_args.packing else DPOTrainer
     trainer = trainer_cls(
         model=model,

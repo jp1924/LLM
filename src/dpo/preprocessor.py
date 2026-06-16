@@ -115,8 +115,10 @@ def dpo_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
                 return value
         return None
 
-    tokenizer = getattr(tokenizer, "tokenizer")
-
+    # 여기서는 토큰화/length 계산을 하지 않는다. map 캐시 파일명이 packing 플래그를 포함하지 않으므로
+    # (stale 방지) 이 함수 출력은 packing 무관한 conversational(str) 형식이어야 한다.
+    #   - packing=False: TRL DPOTrainer 가 이 conversational 데이터를 직접 토큰화/처리
+    #   - packing=True : processing_datasets._pack 에서 토큰화하여 packed input_ids 로 변환
     rows = []
     for row in _iter_rows(example):
         prompt = _get_value(row, PROMPT_KEYS)
@@ -133,40 +135,58 @@ def dpo_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
         if chosen_conv is None:
             continue
 
-        # chosen/reject 의 마지막 답변이 빈 문자열이면 라벨링할 구간이 없어
-        # prompt 구간이 무너져 mismatch 로 이어지므로 미리 건너뛴다.
+        # chosen/reject 의 마지막 답변이 빈 문자열이면 학습할 구간이 없으므로 건너뛴다.
         if not has_trainable_assistant(chosen_conv) or not has_trainable_assistant(reject_conv):
             logger.warning("chosen/reject 답변이 비어 있어 샘플을 건너뜁니다.")
             continue
 
-        # 일부 샘플은 zero-width/특수문자로 assistant 구간을 char offset 으로 찾지 못해
-        # ValueError 가 발생한다. 이런 degenerate 샘플은 건너뛴다.
-        try:
-            chosen_labels, chosen_outputs = create_assistant_labels(tokenizer, chosen_conv, images)
-            reject_labels, reject_outputs = create_assistant_labels(tokenizer, reject_conv, images)
-        except ValueError:
-            logger.warning("assistant 구간을 찾지 못해 샘플을 건너뜁니다.")
-            continue
-        chosen_prompt_ids, chosen_ids = _split_prompt_completion(chosen_labels, chosen_outputs.input_ids)
-        reject_prompt_ids, reject_ids = _split_prompt_completion(reject_labels, reject_outputs.input_ids)
-
-        # 멀티턴이어도 last answer 이전 구간들은 동일해야 한다.
-        if chosen_prompt_ids != reject_prompt_ids:
+        # chosen/reject 는 마지막 assistant turn 만 다르고 그 앞(prompt) 구간은 동일해야 한다.
+        if chosen_conv[:-1] != reject_conv[:-1]:
             logger.warning("chosen/reject 의 prompt 구간이 일치하지 않아 샘플을 건너뜁니다.")
             continue
 
-        prompt_ids = chosen_prompt_ids
-
-        rows.append(
-            {
-                "input_ids": prompt_ids,
-                "chosen": chosen_ids,
-                "rejected": reject_ids,
-                args.length_column_name: len(prompt_ids) + max(len(chosen_ids), len(reject_ids)),
-            }
-        )
+        # TRL preference(explicit-prompt conversational) 포맷: prompt/chosen/rejected 모두 메시지 ls.
+        record = {
+            "prompt": chosen_conv[:-1],
+            "chosen": [chosen_conv[-1]],
+            "rejected": [reject_conv[-1]],
+        }
+        if images is not None:
+            record["images"] = images
+        rows.append(record)
 
     return _columnar(rows)
+
+
+def _tokenize_packed(batch: Dict[str, list], tokenizer, length_column_name: str) -> Dict[str, list]:
+    """conversational prompt/chosen/reject 를 토큰화해 [prompt, chosen_tail, reject_tail] packed 행으로 변환.
+
+    packing 경로 전용. (토큰화는 packing 플래그 별 분리되는 _pack 단계에서만 수행.)
+    position_ids: prompt=0..P-1, chosen/reject 각각 P 부터 재시작(attention.py 캐너니컬 레이아웃).
+    length: P+C+R(packed 행 전체 길이) → pack_dataset 이 이 길이로 bin 을 max_length 에 근사시킨다.
+    """
+    tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+    out_ids, out_pos, out_len = [], [], []
+    for prompt, chosen, rejected in zip(batch["prompt"], batch["chosen"], batch["rejected"]):
+        chosen_conv = list(prompt) + list(chosen)
+        reject_conv = list(prompt) + list(rejected)
+        # degenerate 샘플(assistant 구간 char offset 실패 등)은 건너뛴다.
+        try:
+            chosen_labels, chosen_outputs = create_assistant_labels(tokenizer, chosen_conv)
+            reject_labels, reject_outputs = create_assistant_labels(tokenizer, reject_conv)
+        except ValueError:
+            logger.warning("assistant 구간을 찾지 못해 샘플을 건너뜁니다.")
+            continue
+        c_prompt_ids, c_ids = _split_prompt_completion(chosen_labels, chosen_outputs.input_ids)
+        r_prompt_ids, r_ids = _split_prompt_completion(reject_labels, reject_outputs.input_ids)
+        if c_prompt_ids != r_prompt_ids:
+            logger.warning("chosen/reject 의 prompt 토큰이 일치하지 않아 샘플을 건너뜁니다.")
+            continue
+        P, C, R = len(c_prompt_ids), len(c_ids), len(r_ids)
+        out_ids.append(c_prompt_ids + c_ids + r_ids)
+        out_pos.append(list(range(P)) + list(range(P, P + C)) + list(range(P, P + R)))
+        out_len.append(P + C + R)
+    return {"input_ids": out_ids, "position_ids": out_pos, length_column_name: out_len}
 
 
 PROCESSOR_REGISTRY = {"dpo": dpo_processor}
@@ -177,37 +197,21 @@ def processing_datasets(
     tokenizer: PreTrainedTokenizer,
 ) -> Tuple[Dataset | None, Dataset | None, Dataset | None]:
     def _pack(dataset: Dataset, desc: str) -> Dataset:
-        """캐시된 map(packing 무관) 이후에 실행하는 packing 단계.
+        """캐시된 map(packing 무관, conversational 출력) 이후에 실행하는 packing 단계.
 
-        1) prompt/chosen/reject → packed input_ids + position_ids + 실제 길이(P+C+R) 구성
+        1) conversational prompt/chosen/reject → 토큰화 → packed input_ids + position_ids + length(P+C+R)
         2) 한 그룹이 max_length 를 넘으면 제거(pack_dataset bfd truncate 가 pair 를 손상시키는 것 방지)
         3) trl.pack_dataset 로 여러 그룹을 max_length bin 으로 병합(length 기반 best-fit) → GPU 입력 효율↑
         input_ids/position_ids 가 함께 concat 되어 그룹 경계(position_id==0)가 보존된다.
         """
-
-        def _build_packed(batch: Dict[str, list], length_column_name: str) -> Dict[str, list]:
-            """prompt/chosen/reject 를 [prompt, chosen_tail, reject_tail] 단일 packed 행으로 변환.
-
-            position_ids: prompt=0..P-1, chosen/reject 각각 P 부터 재시작(attention.py 캐너니컬 레이아웃).
-            length: P+C+R(packed 행 전체 길이) → pack_dataset 이 이 길이로 bin을 max_length 에 근사시킨다.
-            """
-            out_ids, out_pos, out_len = [], [], []
-            for prompt, chosen, reject in zip(batch["input_ids"], batch["chosen"], batch["rejected"]):
-                prompt, chosen, reject = list(prompt), list(chosen), list(reject)
-                P, C, R = len(prompt), len(chosen), len(reject)
-                out_ids.append(prompt + chosen + reject)
-                out_pos.append(list(range(P)) + list(range(P, P + C)) + list(range(P, P + R)))
-                out_len.append(P + C + R)
-            return {"input_ids": out_ids, "position_ids": out_pos, length_column_name: out_len}
-
         dataset = dataset.map(
-            _build_packed,
+            _tokenize_packed,
             batched=True,
             batch_size=train_args.dataset_batch_size,
             num_proc=train_args.dataset_num_proc,
             remove_columns=dataset.column_names,
-            fn_kwargs={"length_column_name": train_args.length_column_name},
-            desc=f"{desc}: build packed rows",
+            fn_kwargs={"tokenizer": tokenizer, "length_column_name": train_args.length_column_name},
+            desc=f"{desc}: tokenize + build packed rows",
         )
         dataset = dataset.filter(
             lambda lengths: [length <= train_args.max_length for length in lengths],
@@ -276,24 +280,17 @@ def processing_datasets(
                 if split_key in truncate_map and len(dataset) > truncate_map[split_key]:
                     dataset = dataset.shuffle(seed=train_args.seed).select(range(truncate_map[split_key]))
 
-                if role == "train" and train_args.do_train:
-                    dataset = dataset.filter(
-                        lambda lengths: [length <= train_args.max_length for length in lengths],
-                        num_proc=train_args.dataset_num_proc,
-                        input_columns=[train_args.length_column_name],
-                        cache_file_name=filter_cache.get(split_key),
-                        load_from_cache_file=True,
-                        batched=True,
-                        batch_size=train_args.dataset_batch_size,
-                        desc=f"filter-{repo_name}/{split_key}",
-                    )
-
+                # length 기반 필터는 여기서 하지 않는다(dpo_processor 는 conversational 출력, length 없음).
+                #   - packing=False: TRL DPOTrainer 가 max_length 로 처리(truncation)
+                #   - packing=True : _pack 에서 토큰화 후 max_length 초과 그룹을 제거
                 if getattr(train_args, _DO_FLAG[role]):
                     buckets[role].append(dataset)
 
-    train_dataset = _merge_datasets(buckets["train"], "train", train_args.packing)
-    valid_dataset = _merge_datasets(buckets["valid"], "valid", train_args.packing)
-    test_dataset = _merge_datasets(buckets["test"], "test", train_args.packing)
+    # DPO 는 merge 시점에 set_format("pt")를 하지 않는다(출력이 conversational str → tensor 변환 불가).
+    # non-packing 은 TRL 가, packing 은 _pack 이 최종 포맷을 맞춘다.
+    train_dataset = _merge_datasets(buckets["train"], "train", packing=True)
+    valid_dataset = _merge_datasets(buckets["valid"], "valid", packing=True)
+    test_dataset = _merge_datasets(buckets["test"], "test", packing=True)
 
     if is_main:
         logger.info(f"load_dataset_time: {time.time() - start_time:.2f}s")
