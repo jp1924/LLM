@@ -320,7 +320,6 @@ class PackingCollatorForLLM(DataCollatorMixin):
 
 
 def main(train_args: SFTScriptArguments) -> None:
-    # ── 공통: processor / config / dataset ──────────────────────────────────
     try:
         processor = AutoProcessor.from_pretrained(train_args.model_name_or_path, **train_args.tokenizer_kwargs)
     except OSError:

@@ -14,8 +14,11 @@ from processing_utils import (
     create_assistant_labels,
     has_trainable_assistant,
 )
+from trl.data_utils import pack_dataset
+
 from transformers import PreTrainedTokenizer, TrainingArguments
 from transformers import logging as hf_logging
+
 
 if TYPE_CHECKING:
     from main import DPOScriptArguments
@@ -85,6 +88,24 @@ def _build_dpo_conversations(prompt, chosen, reject, history, images):
     return chosen_conv, reject_conv
 
 
+def _split_prompt_completion(labels: list, input_ids: list) -> Tuple[list, list]:
+    """labels 의 마지막 assistant 구간(=last answer)을 기준으로 (prompt_ids, completion_ids) 분리.
+
+    create_assistant_labels 는 모든 assistant turn 을 라벨링하므로, 멀티턴에서는
+    -100 이 아닌 '마지막 연속 구간' 만 completion 으로 떼어내야 한다.
+    그 앞부분(이전 turn 전부 포함)은 chosen/reject 에서 공통인 prompt 가 된다.
+    """
+    last = next((i for i in range(len(labels) - 1, -1, -1) if labels[i] != -100), None)
+    if last is None:
+        # assistant 구간을 못 찾으면 전부 prompt 로 둔다(이상 케이스).
+        return input_ids, []
+
+    start = last
+    while start > 0 and labels[start - 1] != -100:
+        start -= 1
+    return input_ids[:start], input_ids[start : last + 1]
+
+
 def dpo_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArguments) -> Dict[str, list]:
     def _get_value(row: dict, keys: Tuple[str, ...]):
         """row 에서 keys 순서대로 처음 존재하는(None 이 아닌) 값을 반환한다."""
@@ -136,7 +157,6 @@ def dpo_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
 
         prompt_ids = chosen_prompt_ids
 
-        # prompt+chosen, prompt+reject 전체 길이 중 큰 값을 필터 기준으로 사용.
         rows.append(
             {
                 "input_ids": prompt_ids,
@@ -149,24 +169,6 @@ def dpo_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
     return _columnar(rows)
 
 
-def _split_prompt_completion(labels: list, input_ids: list) -> Tuple[list, list]:
-    """labels 의 마지막 assistant 구간(=last answer)을 기준으로 (prompt_ids, completion_ids) 분리.
-
-    create_assistant_labels 는 모든 assistant turn 을 라벨링하므로, 멀티턴에서는
-    -100 이 아닌 '마지막 연속 구간' 만 completion 으로 떼어내야 한다.
-    그 앞부분(이전 turn 전부 포함)은 chosen/reject 에서 공통인 prompt 가 된다.
-    """
-    last = next((i for i in range(len(labels) - 1, -1, -1) if labels[i] != -100), None)
-    if last is None:
-        # assistant 구간을 못 찾으면 전부 prompt 로 둔다(이상 케이스).
-        return input_ids, []
-
-    start = last
-    while start > 0 and labels[start - 1] != -100:
-        start -= 1
-    return input_ids[:start], input_ids[start : last + 1]
-
-
 PROCESSOR_REGISTRY = {"dpo": dpo_processor}
 
 
@@ -174,6 +176,53 @@ def processing_datasets(
     train_args: "DPOScriptArguments",
     tokenizer: PreTrainedTokenizer,
 ) -> Tuple[Dataset | None, Dataset | None, Dataset | None]:
+    def _pack(dataset: Dataset, desc: str) -> Dataset:
+        """캐시된 map(packing 무관) 이후에 실행하는 packing 단계.
+
+        1) prompt/chosen/reject → packed input_ids + position_ids + 실제 길이(P+C+R) 구성
+        2) 한 그룹이 max_length 를 넘으면 제거(pack_dataset bfd truncate 가 pair 를 손상시키는 것 방지)
+        3) trl.pack_dataset 로 여러 그룹을 max_length bin 으로 병합(length 기반 best-fit) → GPU 입력 효율↑
+        input_ids/position_ids 가 함께 concat 되어 그룹 경계(position_id==0)가 보존된다.
+        """
+
+        def _build_packed(batch: Dict[str, list], length_column_name: str) -> Dict[str, list]:
+            """prompt/chosen/reject 를 [prompt, chosen_tail, reject_tail] 단일 packed 행으로 변환.
+
+            position_ids: prompt=0..P-1, chosen/reject 각각 P 부터 재시작(attention.py 캐너니컬 레이아웃).
+            length: P+C+R(packed 행 전체 길이) → pack_dataset 이 이 길이로 bin을 max_length 에 근사시킨다.
+            """
+            out_ids, out_pos, out_len = [], [], []
+            for prompt, chosen, reject in zip(batch["input_ids"], batch["chosen"], batch["rejected"]):
+                prompt, chosen, reject = list(prompt), list(chosen), list(reject)
+                P, C, R = len(prompt), len(chosen), len(reject)
+                out_ids.append(prompt + chosen + reject)
+                out_pos.append(list(range(P)) + list(range(P, P + C)) + list(range(P, P + R)))
+                out_len.append(P + C + R)
+            return {"input_ids": out_ids, "position_ids": out_pos, length_column_name: out_len}
+
+        dataset = dataset.map(
+            _build_packed,
+            batched=True,
+            batch_size=train_args.dataset_batch_size,
+            num_proc=train_args.dataset_num_proc,
+            remove_columns=dataset.column_names,
+            fn_kwargs={"length_column_name": train_args.length_column_name},
+            desc=f"{desc}: build packed rows",
+        )
+        dataset = dataset.filter(
+            lambda lengths: [length <= train_args.max_length for length in lengths],
+            input_columns=[train_args.length_column_name],
+            num_proc=train_args.dataset_num_proc,
+            batched=True,
+            batch_size=train_args.dataset_batch_size,
+            desc=f"{desc}: drop > max_length",
+        )
+        dataset = dataset.remove_columns(train_args.length_column_name)
+        dataset = pack_dataset(dataset, train_args.max_length, train_args.packing_strategy, {"desc": desc})
+        dataset = dataset.rename_column("seq_lengths", train_args.length_column_name)
+        dataset.set_format("pt")
+        return dataset
+
     if train_args.dataset_type not in PROCESSOR_REGISTRY:
         raise ValueError(f"알 수 없는 데이터 프로세서 타입: {train_args.dataset_type}")
 
@@ -248,5 +297,13 @@ def processing_datasets(
 
     if is_main:
         logger.info(f"load_dataset_time: {time.time() - start_time:.2f}s")
+
+    if train_dataset is not None and train_args.packing:
+        train_dataset = _pack(train_dataset, "Packing dataset")
+
+    # collator 는 args.packing 하나로만 분기(train/eval 공용)하므로, packing 이면 valid 도 반드시
+    # packed 해야 eval 시 _pack_collate 가 position_ids 를 찾을 수 있다(eval_packing 별도 토글 무의미).
+    if valid_dataset is not None and train_args.packing:
+        valid_dataset = _pack(valid_dataset, "Packing eval dataset")
 
     return train_dataset, valid_dataset, test_dataset

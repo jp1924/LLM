@@ -39,7 +39,7 @@ class DataCollatorForPreference(DataCollatorMixin):
     """preference 데이터 collator. packing/non-packing/vision 분기.
 
     Args:
-        args: DPOScriptArguments (use_prefix_packing, max_length 등).
+        args: DPOScriptArguments (packing, max_length 등).
         processing_class: AutoTokenizer 또는 AutoProcessor(vision).
         return_tensors: 기본 "pt".
     """
@@ -48,30 +48,27 @@ class DataCollatorForPreference(DataCollatorMixin):
         self.args = args
         self.processor = processing_class
         self.tokenizer = getattr(processing_class, "tokenizer", processing_class)
-        self.use_packing = bool(getattr(args, "use_prefix_packing", False))
-        self.max_length = getattr(args, "max_length", None)
+        self.use_packing = args.packing
+        self.max_length = args.max_length
         self.pad_token_id = self.tokenizer.pad_token_id
         self.return_tensors = return_tensors
 
     # ----------------------------- 텍스트: packing ----------------------------- #
     def _pack_collate(self, examples: List[dict]) -> dict:
-        """[P1, C1_tail, R1_tail, P2, ...] 단일 packed 행 + position_ids 만 생성.
+        """preprocessor(_pack + trl.pack_dataset)가 미리 만든 packed bin 들을 단일 행으로 concat.
 
-        chosen 을 먼저, reject 를 나중에 쌓는다(순서 규약). 이 순서가 position_ids 의 run 구조로
-        인코딩되어 attention.derive_seg_group/derive_gathers 가 side(0=chosen,1=reject)를 복원한다.
+        각 example 은 이미 [P1, C1_tail, R1_tail, P2, ...] 레이아웃의 input_ids 와 position_ids 를 갖는다
+        (chosen 먼저, reject 나중 순서 규약). bin 은 length 기반으로 max_length 에 근사하게 채워져 있다.
+        그룹 경계(position_id==0)가 concat 후에도 유지되어 attention.derive_seg_group/derive_gathers 가
+        side(0=chosen,1=reject)를 복원한다.
         """
         input_ids: List[int] = []
         pos_ids: List[int] = []
         for ex in examples:
-            prompt = _ids(ex, "prompt_ids", "prompt_input_ids", "input_ids")
-            chosen = _ids(ex, "chosen_ids", "chosen_input_ids", "chosen")
-            rejected = _ids(ex, "rejected_ids", "rejected_input_ids", "rejected")
-            P = len(prompt)
-            input_ids += prompt
-            pos_ids += list(range(P))
-            for tail in (chosen, rejected):  # 순서 고정: chosen → reject
-                input_ids += tail
-                pos_ids += list(range(P, P + len(tail)))
+            ids = ex.get("input_ids")
+            pos = ex.get("position_ids")
+            input_ids += ids.tolist() if torch.is_tensor(ids) else list(ids)
+            pos_ids += pos.tolist() if torch.is_tensor(pos) else list(pos)
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long)[None],
             "position_ids": torch.tensor(pos_ids, dtype=torch.long)[None],

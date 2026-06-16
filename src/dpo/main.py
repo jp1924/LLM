@@ -6,8 +6,10 @@ from typing import List, Union
 
 import datasets
 import torch
+from adepters import get_peft_config
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
 from setproctitle import setproctitle
+from trainer import PackingDPOTrainer
 from trl import (
     DPOConfig,
     DPOTrainer,
@@ -21,8 +23,6 @@ import transformers
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, set_seed
 from transformers import logging as hf_logging
 from transformers.trainer_pt_utils import get_model_param_count
-
-from adepters import get_peft_config
 
 
 logger = hf_logging.get_logger("transformers")
@@ -115,20 +115,14 @@ class DPOScriptArguments(DPOConfig, ModelConfig):
     )
 
     # -------------------------- Packing Args -------------------------- #
-    use_prefix_packing: bool = field(
-        default=False,
-        metadata={
-            "help": "True 면 prefix-sharing packing(attention.py)을 사용하는 PackingDPOTrainer 로 학습한다. "
-            "flash-attn 2 미지원 모델에서도 SDPA fallback 으로 packing 가능."
-        },
-    )
     # SFTConfig 에는 있으나 DPOConfig 에는 없는 packing 관련 필드. 공용 preprocessor
     # (_merge_datasets 등)가 train_args.packing 을 참조하므로 SFT 와 동일 기본값으로 추가한다.
-    # 주의: DPO 의 실제 패킹은 토큰 병합(SFT pack_dataset)이 아니라 collator 단의 prefix-packing
-    # (use_prefix_packing)으로 수행한다. 여기서 packing 은 데이터 포맷 유지(set_format 생략) 용도다.
+    # DPO 에서 packing 은 데이터 처리 단계의 포맷 유지(list 포맷, set_format 생략)와
+    # collator 단의 prefix-sharing packing(attention.py) 을 함께 제어한다.
+    # flash-attn 2 미지원 모델에서도 SDPA fallback 으로 packing 가능.
     packing: bool = field(
         default=False,
-        metadata={"help": "데이터 처리 단계에서 packing(=list 포맷 유지) 여부. DPO 는 collator 에서 prefix-packing 수행."},
+        metadata={"help": "True 면 데이터를 list 포맷으로 유지하고 collator 에서 prefix-sharing packing 을 수행한다."},
     )
     packing_strategy: str = field(
         default="bfd",
@@ -209,17 +203,10 @@ def main(train_args: DPOScriptArguments) -> None:
 
     logger.info(f"Model parameter count: {get_model_param_count(model)}")
 
-    if train_args.use_prefix_packing:
-        from trainer import PackingDPOTrainer
-
-        trainer_cls = PackingDPOTrainer
-    else:
-        trainer_cls = DPOTrainer
-
-    train_args.packing = False  # processing_datasets에서 이미 패킹이 적용되었기 때문에 False로 설정
     train_args.eval_packing = False  # 이미 초기화 했기 때문에 SFTTrainer에서 모델 초기화 방식을 사용하지 않도록 설정
     train_args.model_init_kwargs = None
 
+    trainer_cls = PackingDPOTrainer if train_args.packing else DPOTrainer
     trainer = trainer_cls(
         model=model,
         ref_model=ref_model,
