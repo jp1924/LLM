@@ -1,5 +1,5 @@
 
-# SupervisedFineTuning/Pretrain
+# Supervised Fine-Tuning
 
 `main.py`에 학습과 관련된 대부분의 코드를 구현하고, 데이터 전처리는 `preprocessor.py`로 분할.
 

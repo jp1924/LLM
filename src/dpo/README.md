@@ -1,4 +1,4 @@
-# DPO
+# Direct Preference Optimization
 
 SFT와 같은 철학(단일 train_args, main.py 구조, 데이터 맵, 캐시)을 그대로 잇는다. 공통 규칙은 최상위 README, 라벨링은 SFT README를 본다. 여기선 DPO 고유한 부분만 적었음.
 
