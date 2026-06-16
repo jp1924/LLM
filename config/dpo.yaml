@@ -3,6 +3,7 @@ env:
   WANDB_PROJECT: "DPO"
   WANDB_RUN_GROUP: 'ultrafeedback_binarized'
   WANDB_WATCH: ""
+  WANDB_NOTES: ""
   # torch
   TORCH_DISTRIBUTED_DEBUG: "OFF"
   TORCHDYNAMO_VERBOSE: "1"

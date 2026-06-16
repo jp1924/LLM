@@ -99,10 +99,10 @@ def processing_datasets(
         dataset.set_format("pt")
         return dataset
 
-    if train_args.data_preprocessor_type not in PROCESSOR_REGISTRY:
-        raise ValueError(f"알 수 없는 데이터 프로세서 타입: {train_args.data_preprocessor_type}")
+    if train_args.dataset_type not in PROCESSOR_REGISTRY:
+        raise ValueError(f"알 수 없는 데이터 프로세서 타입: {train_args.dataset_type}")
 
-    func = PROCESSOR_REGISTRY[train_args.data_preprocessor_type]
+    func = PROCESSOR_REGISTRY[train_args.dataset_type]
     is_main = train_args.distributed_state.is_local_main_process
     start_time = time.time()
 

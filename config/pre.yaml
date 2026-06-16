@@ -3,6 +3,7 @@ env:
   WANDB_PROJECT: "LLM"
   WANDB_RUN_GROUP: 'NationalCorpus'
   WANDB_WATCH: ""
+  WANDB_NOTES: ""
   # torch
   TORCH_DISTRIBUTED_DEBUG: "OFF"
   TORCHDYNAMO_VERBOSE: "1"
@@ -17,7 +18,7 @@ do_data_main_process_first: false
 preprocessing_batched: true
 preprocessing_num_workers: 4
 preprocessing_batch_size: 1000
-data_preprocessor_type: "pretrain" # or pretrain 하면 preprocess.py에서 pretrain으로 처리
+dataset_type: "pretrain" # or pretrain 하면 preprocess.py에서 pretrain으로 처리
 dataset_repo_ls:
   - "jp1924/CorpusForLLMNationalRecordsAndArchives"
 data_name_map:

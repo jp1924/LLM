@@ -3,6 +3,7 @@ env:
   WANDB_PROJECT: "SFT"
   WANDB_RUN_GROUP: 'ultrafeedback_binarized'
   WANDB_WATCH: ""
+  WANDB_NOTES: ""
   # torch
   TORCH_DISTRIBUTED_DEBUG: "OFF"
   TORCHDYNAMO_VERBOSE: "1"
@@ -17,7 +18,7 @@ model_name_or_path: 'google/gemma-4-31B-it'
 dataset_num_proc: 4
 dataset_batch_size: 1000
 max_length: 8196
-data_preprocessor_type: "sft" # or pretrain
+dataset_type: "sft" # or pretrain
 dataset_repo_ls:
   - "HuggingFaceH4/ultrafeedback_binarized"
 dataset_prefix:

@@ -50,7 +50,7 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
             "help": "학습에 사용할 데이터셋의 hub_repo 이름을 리스트로 입력한다. 예: ['hf_repo1', 'hf_repo2']. datasets 4.0.0 이라면 remote_code는 동작하지 않기 때문에 이 점을 알고 사용해야 한다."
         },
     )
-    data_preprocessor_type: str = field(
+    dataset_type: str = field(
         default="sft",
         metadata={
             "help": f"학습할 데이터의 전처리를 어떻게 할지 결정하는 값. {', '.join(PROCESSOR_REGISTRY.keys())} 중 하나여야 한다.",
@@ -88,11 +88,6 @@ class SFTScriptArguments(SFTConfig, ModelConfig):
     )
 
     # -------------------------- Training Args ------------------------- #
-
-    chat_template: str = field(
-        default=None,
-        metadata={"help": "The template for chat interactions."},
-    )
 
     config_kwargs: Union[dict, str] | None = field(
         default_factory=dict,
