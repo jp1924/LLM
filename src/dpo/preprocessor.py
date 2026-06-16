@@ -3,10 +3,6 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Dict, Tuple
 
 from datasets import Dataset, DatasetDict
-
-from transformers import PreTrainedTokenizer, TrainingArguments
-from transformers import logging as hf_logging
-
 from processing_utils import (
     _cache_exists,
     _columnar,
@@ -16,8 +12,10 @@ from processing_utils import (
     _merge_datasets,
     _role_of,
     create_assistant_labels,
+    has_trainable_assistant,
 )
-
+from transformers import PreTrainedTokenizer, TrainingArguments
+from transformers import logging as hf_logging
 
 if TYPE_CHECKING:
     from main import DPOScriptArguments
@@ -114,10 +112,21 @@ def dpo_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
         if chosen_conv is None:
             continue
 
-        chosen_labels, chosen_outputs = create_assistant_labels(tokenizer, chosen_conv, images)
-        chosen_prompt_ids, chosen_ids = _split_prompt_completion(chosen_labels, chosen_outputs.input_ids)
+        # chosen/reject 의 마지막 답변이 빈 문자열이면 라벨링할 구간이 없어
+        # prompt 구간이 무너져 mismatch 로 이어지므로 미리 건너뛴다.
+        if not has_trainable_assistant(chosen_conv) or not has_trainable_assistant(reject_conv):
+            logger.warning("chosen/reject 답변이 비어 있어 샘플을 건너뜁니다.")
+            continue
 
-        reject_labels, reject_outputs = create_assistant_labels(tokenizer, reject_conv, images)
+        # 일부 샘플은 zero-width/특수문자로 assistant 구간을 char offset 으로 찾지 못해
+        # ValueError 가 발생한다. 이런 degenerate 샘플은 건너뛴다.
+        try:
+            chosen_labels, chosen_outputs = create_assistant_labels(tokenizer, chosen_conv, images)
+            reject_labels, reject_outputs = create_assistant_labels(tokenizer, reject_conv, images)
+        except ValueError:
+            logger.warning("assistant 구간을 찾지 못해 샘플을 건너뜁니다.")
+            continue
+        chosen_prompt_ids, chosen_ids = _split_prompt_completion(chosen_labels, chosen_outputs.input_ids)
         reject_prompt_ids, reject_ids = _split_prompt_completion(reject_labels, reject_outputs.input_ids)
 
         # 멀티턴이어도 last answer 이전 구간들은 동일해야 한다.

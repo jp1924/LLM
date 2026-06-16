@@ -5,12 +5,13 @@ enable_cpu_affinity: false
 distributed_type: DEEPSPEED
 deepspeed_config:
   zero_stage: 3
-  offload_param_device: cpu
-  offload_optimizer_device: cpu
+  offload_param_device: none
+  offload_optimizer_device: none
   zero3_save_16bit_model: true
   deepspeed_multinode_launcher: standard
   zero3_init_flag: true
 num_processes: 2
+gpu_ids: 0,1
 mixed_precision: bf16
 # parallelism_config:
 #   parallelism_config_dp_replicate_size: 1

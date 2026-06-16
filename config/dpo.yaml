@@ -1,70 +1,101 @@
+env:
+  # WanDB
+  WANDB_PROJECT: "DPO"
+  WANDB_RUN_GROUP: 'ultrafeedback_binarized'
+  WANDB_WATCH: ""
+  # torch
+  TORCH_DISTRIBUTED_DEBUG: "OFF"
+  TORCHDYNAMO_VERBOSE: "1"
+  TORCHDYNAMO_DISABLE: "1"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,roundup_power2_divisions:[32:256,64:128,256:64,>:32]"
+  CUDA_DEVICE_ORDER: 'PCI_BUS_ID'
+  OMP_NUM_THREADS: 2
+output_dir: "./output_dir/gemma-4-31b-it/ultrafeedback-dpo"
 model_name_or_path: "google/gemma-4-31B-it"
 
-
+# 데이터 전처리와 관련된 값
+dataset_num_proc: 4
+dataset_batch_size: 1000
+max_length: 8196
 dataset_type: "dpo"
 dataset_repo_ls:
   - "HuggingFaceH4/ultrafeedback_binarized"
 dataset_prefix:
-  default:
-    train:
-      - train
-dataset_truncate_map:
   "HuggingFaceH4/ultrafeedback_binarized":
-    train: 200
-dataset_num_proc: 16
-dataset_batch_size: 1000
-max_length: 4096
+    train:
+      - train_prefs
+    valid:
+      - test_prefs
 
-
-use_prefix_packing: true
-
-
+# train & valid step과 관련된 값
+do_train: true
 per_device_train_batch_size: 2
 gradient_accumulation_steps: 1
-max_steps: 10
 num_train_epochs: 1
-do_train: true
-do_eval: false
-do_predict: false
 
-
+# DPO loss와 관련된 값
 beta: 0.1
 loss_type: sigmoid
 
-
-learning_rate: 5.0e-6
+# optim, scheduler와 관련된 값
+learning_rate: 2e-4
 lr_scheduler_type: cosine
-warmup_ratio: 0.0
+warmup_ratio: 0.03
 max_grad_norm: 1.0
 weight_decay: 0
 optim: adamw_bnb_8bit
 
-
+# save & eval을 설정하는 값
+do_eval: true
+do_predict: false
+eval_on_start: false
+per_device_eval_batch_size: 16
+eval_accumulation_steps: 1
 eval_strategy: 'no'
+eval_steps: 20
+## lm eval과 관련된 값
+eval_harness_tasks:
+  - kmmlu
+
+# save과 관련된 값
 save_strategy: 'no'
+save_steps: 20
+save_only_model: true
 
-
-bf16: true
-tf32: true
-dtype: bfloat16
-use_liger_kernel: false
-torch_compile: false
-attn_implementation: sdpa
-gradient_checkpointing: true
-gradient_checkpointing_kwargs:
-  use_reentrant: false
-dataloader_num_workers: 2
-packing: true
-eval_packing: false
-remove_unused_columns: false
-ddp_timeout: 18000000
-seed: 42
-run_name: "dpo-smoke-gemma4-31b"
-
-
+# logging과 관련된 값
 report_to: 'none'
 logging_strategy: 'steps'
 logging_steps: 1
 
+# 학습 최적화와 관련된 값
+bf16: true
+tf32: true
+dtype: bfloat16
+torch_compile: true
+use_liger_kernel: false
+attn_implementation: flex_attention
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true
+## packing과 관련된 값
+use_prefix_packing: true
 
-use_peft: false
+# dataloader와 관련된 값
+dataloader_prefetch_factor: 10
+dataloader_num_workers: 2
+
+# 기타 최적화
+include_num_input_tokens_seen: true
+remove_unused_columns: false
+ddp_timeout: 18000000
+seed: 42
+run_name: "dpo"
+
+########################
+use_peft: true
+lora_task_type: CAUSAL_LM
+lora_r: 16
+lora_target_modules: all-linear
+lora_alpha: 16
+lora_dropout: 0
+use_rslora: false

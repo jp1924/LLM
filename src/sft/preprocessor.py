@@ -4,12 +4,7 @@ from typing import TYPE_CHECKING, Dict, Tuple
 
 import numpy as np
 from datasets import Dataset, DatasetDict
-from trl.data_utils import pack_dataset
-
-from transformers import PreTrainedTokenizer, TrainingArguments
-from transformers import logging as hf_logging
-
-from ..processor_utils import (
+from processing_utils import (
     _cache_exists,
     _columnar,
     _get_cache_dir,
@@ -20,7 +15,12 @@ from ..processor_utils import (
     _role_of,
     _to_conversational_list,
     create_assistant_labels,
+    has_trainable_assistant,
 )
+from trl.data_utils import pack_dataset
+
+from transformers import PreTrainedTokenizer, TrainingArguments
+from transformers import logging as hf_logging
 
 
 if TYPE_CHECKING:
@@ -50,7 +50,18 @@ def sft_processor(example, _, tokenizer: PreTrainedTokenizer, args: TrainingArgu
             for turn in conversation
         ]
 
-        labels, outputs = create_assistant_labels(tokenizer, processed, images=images)
+        # 학습 가능한 assistant turn 이 없으면(빈 문자열 등) 건너뛴다.
+        if not has_trainable_assistant(processed):
+            logger.warning("assistant 응답이 비어 있어 샘플을 건너뜁니다.")
+            continue
+
+        # 일부 샘플은 zero-width/특수문자/비라틴 스크립트로 assistant 구간을 char offset 으로
+        # 찾지 못해 ValueError 가 발생한다. 이런 degenerate 샘플은 건너뛴다.
+        try:
+            labels, outputs = create_assistant_labels(tokenizer, processed, images=images)
+        except ValueError:
+            logger.warning("assistant 구간을 찾지 못해 샘플을 건너뜁니다.")
+            continue
         rows.append({"labels": labels, args.length_column_name: len(outputs.input_ids), **outputs})
 
     return _columnar(rows)

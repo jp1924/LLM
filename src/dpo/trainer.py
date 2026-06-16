@@ -482,7 +482,9 @@ class PackingDPOTrainer(DPOTrainer):
         if "position_ids" not in inputs:
             return super()._compute_loss_liger(model, inputs, return_outputs)
         if return_outputs:
-            raise RuntimeError("liger packing 은 logits 를 materialize 하지 않아 return_outputs=True 를 지원하지 않는다.")
+            raise RuntimeError(
+                "liger packing 은 logits 를 materialize 하지 않아 return_outputs=True 를 지원하지 않는다."
+            )
 
         mode = "train" if self.model.training else "eval"
         device = self.accelerator.device

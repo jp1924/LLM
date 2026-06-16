@@ -65,17 +65,46 @@ def _assistant_text(content: Any) -> str:
     return str(content)
 
 
-def _labels_via_offsets(enc, text: str, conversations: list, input_ids: list) -> list:
-    """fast tokenizer: char_to_token 으로 assistant 구간 → labels."""
+def _find_from(text: str, needle: str, cursor: int, tokenizer=None) -> Tuple[int, str]:
+    """cursor 이후에서 needle 을 찾는다. 실패 시 encode→decode round-trip 문자열로 재시도.
+
+    반환: (start_idx, 실제로 매칭된 문자열). 못 찾으면 (-1, needle).
+    """
+    start_idx = text.find(needle, cursor)
+    if start_idx != -1:
+        return start_idx, needle
+    if tokenizer is not None:
+        # 원본 문자열은 encode→decode 정규화(zero-width/special char 등) 때문에
+        # decode 공간인 `text` 와 다를 수 있다. round-trip 한 문자열로 다시 찾는다.
+        needle_rt = tokenizer.decode(tokenizer(needle, add_special_tokens=False).input_ids)
+        rt_idx = text.find(needle_rt, cursor)
+        if rt_idx != -1:
+            return rt_idx, needle_rt
+    return -1, needle
+
+
+def _labels_via_offsets(enc, text: str, conversations: list, input_ids: list, tokenizer=None) -> list:
+    """fast tokenizer: char_to_token 으로 assistant 구간 → labels.
+
+    턴을 순서대로 순회하며 cursor 를 전진시켜, 각 턴의 content 를 이전 턴 이후에서만
+    찾는다. 이렇게 하면 assistant 답변이 user prompt 의 문구를 그대로 인용해도
+    prompt 구간의 이른 occurrence 에 잘못 매칭되지 않는다(prompt-echo 방지).
+    """
     labels = [-100] * len(input_ids)
+    cursor = 0
     for chat in conversations:
+        content = _assistant_text(chat["content"])
+        start_idx, content = _find_from(text, content, cursor, tokenizer)
+        if start_idx == -1:
+            # assistant 턴은 라벨링에 필수 → 못 찾으면 에러. user 턴은 anchor 실패해도 진행.
+            if chat["role"] == "assistant":
+                raise ValueError(f"tokenizer is weird. cannot find assistant content: {content} > {text}")
+            continue
+        end_idx = start_idx + len(content)
+        cursor = end_idx  # 다음 턴 검색은 이 위치 이후부터 → prompt-echo 오매칭 방지
+
         if chat["role"] != "assistant":
             continue
-        answer = _assistant_text(chat["content"])
-        start_idx = text.find(answer)
-        if start_idx == -1:
-            raise ValueError(f"tokenizer is weird. cannot find assistant content: {answer} > {text}")
-        end_idx = start_idx + len(answer)
 
         token_start = enc.char_to_token(start_idx)
         # 종료 토큰(턴 terminator)까지 포함해 stop을 학습. 마지막 글자면 종료 토큰이 없을 수 있음.
@@ -89,36 +118,43 @@ def _labels_via_offsets(enc, text: str, conversations: list, input_ids: list) ->
     return _fix_trailing_labels(labels, input_ids)
 
 
-def _labels_via_sentencepiece(tokenizer, input_ids: list, conversations: list) -> list:
-    """slow tokenizer: 디코딩-공간 문자열 매칭으로 assistant 구간 → labels (기존 방식 유지)."""
-    offset_ls, text = get_sentencepiece_offset(tokenizer, input_ids)
+def strip_conversation(conversations: list) -> list:
+    """conversation 의 모든 메시지 content 앞/뒤 공백을 제거한 새 list 를 반환한다."""
 
-    answer_ls = [chat["content"] for chat in conversations if chat["role"] == "assistant"]
-    answer_ids_list = tokenizer(answer_ls, add_special_tokens=False).input_ids
-    all_answer_tokens = ["".join(tokenizer.batch_decode([[tid] for tid in ids])) for ids in answer_ids_list]
+    def _strip_message_content(content: Any) -> Any:
+        """메시지 content 의 앞/뒤 공백을 제거한다(멀티모달 list 면 text part 만 strip).
 
-    answer_pos_ls = []
-    for new_answer in all_answer_tokens:
-        start_idx = text.find(new_answer)
-        if start_idx == -1:
-            raise ValueError(f"tokenizer is weird. cannot find assistant content: {new_answer} > {text}")
-        answer_pos_ls.append((start_idx, start_idx + len(new_answer) + 1))
+        대부분의 chat template(예: Gemma)은 각 turn content 의 앞/뒤 공백을
+        렌더링 단계에서 strip 한 뒤 turn 종료 토큰을 붙인다. 따라서 원본 content 가
+        공백으로 시작/끝나면 디코딩된 text 의 substring 으로 더 이상 존재하지 않아
+        `_find_from`(char offset 매칭) 이 실패한다. 들어가기 전에 동일하게 strip 해서
+        원본 content 와 디코딩 text 의 공백 불일치를 제거한다.
+        """
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            out = []
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    out.append({**part, "text": part["text"].strip()})
+                else:
+                    out.append(part)
+            return out
+        return content
 
-    labels = [-100] * len(input_ids)
-    for start_idx, end_idx in answer_pos_ls:
-        token_start_idx = None
-        token_end_idx = None
-        for idx, _, start, _, _ in offset_ls:
-            if start >= start_idx and token_start_idx is None:
-                token_start_idx = idx
-            if start < end_idx:
-                token_end_idx = idx
-            elif token_start_idx is not None:
-                break
-        if token_start_idx is not None and token_end_idx is not None:
-            labels[token_start_idx : token_end_idx + 1] = input_ids[token_start_idx : token_end_idx + 1]
+    return [{**m, "content": _strip_message_content(m.get("content", ""))} for m in conversations]
 
-    return _fix_trailing_labels(labels, input_ids)
+
+def has_trainable_assistant(conversations: list) -> bool:
+    """학습 가능한(빈 문자열이 아닌) assistant turn 이 하나라도 있는지 확인한다.
+
+    chosen/reject/answer 가 빈 문자열이면 라벨링할 구간이 없어 boundary 가 무너지고
+    prompt 구간 불일치 등 degenerate 결과를 낳으므로, 호출부에서 미리 건너뛰는 데 쓴다.
+    """
+    for m in conversations:
+        if m.get("role") == "assistant" and _assistant_text(m.get("content", "")).strip():
+            return True
+    return False
 
 
 def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list, Any]:
@@ -126,10 +162,46 @@ def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list
 
     - fast tokenizer: `return_offsets_mapping` + `char_to_token` (네이티브, 빠름)
     - slow tokenizer: `get_sentencepiece_offset` 기반 수동 매칭 (기존 동작 보존)
+
+    NOTE: chat template 의 공백 strip 동작과 어긋나 char offset 매칭이 실패하는 것을
+    막기 위해, 렌더링 전에 모든 메시지 content 를 strip 한다(SFT/DPO 공통 적용).
     """
+
+    def _labels_via_sentencepiece(tokenizer, input_ids: list, conversations: list) -> list:
+        """slow tokenizer: 디코딩-공간 문자열 매칭으로 assistant 구간 → labels (기존 방식 유지)."""
+        offset_ls, text = get_sentencepiece_offset(tokenizer, input_ids)
+
+        answer_ls = [chat["content"] for chat in conversations if chat["role"] == "assistant"]
+        answer_ids_list = tokenizer(answer_ls, add_special_tokens=False).input_ids
+        all_answer_tokens = ["".join(tokenizer.batch_decode([[tid] for tid in ids])) for ids in answer_ids_list]
+
+        answer_pos_ls = []
+        for new_answer in all_answer_tokens:
+            start_idx = text.find(new_answer)
+            if start_idx == -1:
+                raise ValueError(f"tokenizer is weird. cannot find assistant content: {new_answer} > {text}")
+            answer_pos_ls.append((start_idx, start_idx + len(new_answer) + 1))
+
+        labels = [-100] * len(input_ids)
+        for start_idx, end_idx in answer_pos_ls:
+            token_start_idx = None
+            token_end_idx = None
+            for idx, _, start, _, _ in offset_ls:
+                if start >= start_idx and token_start_idx is None:
+                    token_start_idx = idx
+                if start < end_idx:
+                    token_end_idx = idx
+                elif token_start_idx is not None:
+                    break
+            if token_start_idx is not None and token_end_idx is not None:
+                labels[token_start_idx : token_end_idx + 1] = input_ids[token_start_idx : token_end_idx + 1]
+
+        return _fix_trailing_labels(labels, input_ids)
+
     if len(conversations) % 2:
         raise ValueError("Conversations should have an even number of messages (user starts, assistant ends).")
 
+    conversations = strip_conversation(conversations)
     rendered = tokenizer.apply_chat_template(conversations, tokenize=False)
     outputs = tokenizer(
         **{"text": rendered, **({"images": images} if images else {})},
@@ -147,7 +219,7 @@ def create_assistant_labels(tokenizer, conversations, images=None) -> Tuple[list
         enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
         input_ids = enc["input_ids"]
         outputs.update({"input_ids": input_ids})
-        labels = _labels_via_offsets(enc, text, conversations, input_ids)
+        labels = _labels_via_offsets(enc, text, conversations, input_ids, tokenizer)
     else:
         input_ids = tokenizer.encode(text, add_special_tokens=False)
         outputs.update({"input_ids": input_ids})

@@ -7,8 +7,6 @@ from transformers import AttentionInterface
 from transformers.integrations.sdpa_attention import repeat_kv
 
 
-
-
 def longest_common_prefix_len(a: Sequence[int], b: Sequence[int]) -> int:
     """두 토큰 시퀀스의 공통 prefix 길이 (= 공유 prompt 길이)."""
     n = 0

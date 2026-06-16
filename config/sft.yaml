@@ -1,7 +1,7 @@
 env:
   # WanDB
-  WANDB_PROJECT: "LLM"
-  WANDB_RUN_GROUP: 'KoreaMathWordProblem'
+  WANDB_PROJECT: "SFT"
+  WANDB_RUN_GROUP: 'ultrafeedback_binarized'
   WANDB_WATCH: ""
   # torch
   TORCH_DISTRIBUTED_DEBUG: "OFF"
@@ -10,88 +10,87 @@ env:
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,roundup_power2_divisions:[32:256,64:128,256:64,>:32]"
   CUDA_DEVICE_ORDER: 'PCI_BUS_ID'
   OMP_NUM_THREADS: 2
-output_dir: "/root/output_dir/gemma-3-12b-it/KoOrcaMath-14500"
-model_name_or_path: 'google/gemma-3-12b-it'
+output_dir: "./output_dir/gemma-4-31b-it/ultrafeedback-sft"
+model_name_or_path: 'google/gemma-4-31B-it'
+
 # 데이터 전처리와 관련된 값
-preprocessing_num_workers: 4
-preprocessing_batch_size: 1000
+dataset_num_proc: 4
+dataset_batch_size: 1000
 max_length: 8196
 data_preprocessor_type: "sft" # or pretrain
 dataset_repo_ls:
-  - "jp1924/korean-math-sft"
-  - "jp1924/KoOrcaMath"
-# data_name_map:
-#   jp1924/KoOrcaMath: 
-data_truncate_map:
-  "jp1924/KoOrcaMath": 
-    train: 14500
-data_split_map:
-  "jp1924/korean-math-sft":
-    - validation
-    - test
+  - "HuggingFaceH4/ultrafeedback_binarized"
 dataset_prefix:
-  train:
-    - train
-  valid:
-    - validation
-    - test
-  test:
-    - test
+  "HuggingFaceH4/ultrafeedback_binarized":
+    train:
+      - train_sft
+    valid:
+      - test_sft
+
 # train & valid step과 관련된 값
-per_device_train_batch_size: 64
-gradient_accumulation_steps: 1
-per_device_eval_batch_size: 32
-eval_accumulation_steps: 1
-num_train_epochs: 2
-# train or valid or test 수행할지 말지 결정하는 값
 do_train: true
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 1
+num_train_epochs: 1
+
 # optim, scheduler와 관련된 값
-learning_rate: 2e-5
+learning_rate: 2e-4
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
-# optim: apollo_adamw
-# optim_args: proj=random
-# optim_target_modules: 
-#   - 'model.language_model.layers.*.self_attn.*'
-optim: adamw_torch_fused
+max_grad_norm: 1.0
+weight_decay: 0
+optim: adamw_bnb_8bit
+
 # save & eval을 설정하는 값
-torch_empty_cache_steps: 20
 do_eval: true
 do_predict: false
+eval_on_start: true
+per_device_eval_batch_size: 16
+eval_accumulation_steps: 1
 eval_strategy: 'steps'
 eval_steps: 20
+## lm eval과 관련된 값
+eval_harness_tasks:
+  - kmmlu
+
+# save과 관련된 값
 save_strategy: 'steps'
 save_steps: 20
 save_only_model: true
+
 # logging과 관련된 값
-report_to: 'wandb'
+report_to: 'none'
 logging_strategy: 'steps'
 logging_steps: 1
+
 # 학습 최적화와 관련된 값
+torch_empty_cache_steps: 20
 bf16: true
 tf32: true
 dtype: bfloat16
 weight_decay: 0
 torch_compile: true
 use_liger_kernel: true
-attn_implementation: flash_attention_2
+attn_implementation: flex_attention
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
+## packing과 관련된 값
+packing: false
+
 # dataloader와 관련된 값
 dataloader_prefetch_factor: 10
-dataloader_num_workers: 1
-packing: false
+dataloader_num_workers: 2
+
 # 기타 최적화
 include_num_input_tokens_seen: true
 remove_unused_columns: false
 ddp_timeout: 18000000
 seed: 42
 run_name: "sft"
-eval_harness_tasks: kmmlu
-eval_on_start: true
+
 ########################
-use_peft: false
+use_peft: true
 lora_task_type: CAUSAL_LM
 lora_r: 16
 lora_target_modules: all-linear

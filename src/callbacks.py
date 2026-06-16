@@ -381,10 +381,19 @@ class WandbCodeArtifactCallback(TrainerCallback):
         self,
         root: str,
         include_dirs=("src/sft", "run_scripts", "config"),
-        include_files=("pyproject.toml", "uv.lock", "run_train.sh", "Dockerfile", "docker-compose.yml"),
+        include_files=(
+            "pyproject.toml",
+            "uv.lock",
+            "run_train.sh",
+            "Dockerfile",
+            "docker-compose.yml",
+            "logs/sft.log",
+        ),
         name: str = "train_code",
         exclude_suffix=(".pyc", ".log", ".arrow", ".bin", ".safetensors"),
         exclude_parts=("__pycache__", ".venv", "wandb", "logs", ".git"),
+        log_dir="logs",
+        log_name: str = "train_logs",
     ) -> None:
         self.root = Path(root)
         self.include_dirs = include_dirs
@@ -392,6 +401,8 @@ class WandbCodeArtifactCallback(TrainerCallback):
         self.name = name
         self.exclude_suffix = set(exclude_suffix)
         self.exclude_parts = set(exclude_parts)
+        self.log_dir = log_dir
+        self.log_name = log_name
         self._done = False
 
     def on_train_begin(self, args, state, control, **kwargs):
@@ -429,6 +440,41 @@ class WandbCodeArtifactCallback(TrainerCallback):
         wandb.run.log_artifact(artifact)
         print(f"[WandbCodeArtifactCallback] code artifact '{self.name}' 업로드: {count} files")
         self._done = True
+
+    def on_train_end(self, args, state, control, **kwargs):
+        # 학습 종료 후 logs 폴더에 쌓인 로그 파일을 별도 아티팩트로 업로드
+        if not state.is_world_process_zero or wandb.run is None:
+            return
+
+        log_base = self.root / self.log_dir
+        if not log_base.exists():
+            print(f"[WandbCodeArtifactCallback] log dir '{log_base}' 없음 - 로그 업로드 건너뜀")
+            return
+
+        artifact = wandb.Artifact(
+            name=self.log_name,
+            type="logs",
+            description=f"학습 로그 (run={wandb.run.name})",
+            metadata={"run_id": wandb.run.id},
+        )
+
+        count = 0
+        if log_base.is_file():
+            artifact.add_file(str(log_base), name=str(log_base.relative_to(self.root)))
+            count += 1
+        else:
+            for file in sorted(log_base.rglob("*")):
+                if not file.is_file():
+                    continue
+                artifact.add_file(str(file), name=str(file.relative_to(self.root)))
+                count += 1
+
+        if count == 0:
+            print(f"[WandbCodeArtifactCallback] '{log_base}' 안에 업로드할 로그 파일 없음")
+            return
+
+        wandb.run.log_artifact(artifact)
+        print(f"[WandbCodeArtifactCallback] log artifact '{self.log_name}' 업로드: {count} files")
 
 
 class GpuMemoryCallback(TrainerCallback):

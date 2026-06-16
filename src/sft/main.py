@@ -7,6 +7,7 @@ from typing import List, Union
 import datasets
 import torch
 from accelerate import DataLoaderConfiguration, ParallelismConfig
+from adepters import get_peft_config
 from datasets import Dataset
 from preprocessor import PROCESSOR_REGISTRY, processing_datasets
 from setproctitle import setproctitle
@@ -25,8 +26,6 @@ from transformers import logging as hf_logging
 from transformers.data.data_collator import DataCollatorMixin
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.trainer_pt_utils import get_model_param_count
-
-from ..adepters import get_peft_config
 
 
 logger = hf_logging.get_logger("transformers")
