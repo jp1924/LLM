@@ -203,7 +203,7 @@ class PackingCollatorForLLM(DataCollatorMixin):
         self.use_packing = self.args.packing
         self.pad_token_id = self.tokenizer.pad_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
-        self.process_type = args.data_preprocessor_type
+        self.process_type = args.dataset_type
 
         if sample_dataset is not None and self.args.distributed_state.is_local_main_process:
             sample_check = self([sample_dataset[0], sample_dataset[1]])

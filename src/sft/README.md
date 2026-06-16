@@ -5,7 +5,7 @@
 
 ## 학습 방식 선택
 
-`data_preprocessor_type`으로 sft / pretrain을 선택
+`dataset_type`으로 sft / pretrain을 선택
 
 - sft: 권장 컬럼 `conversations`, `prompt`, `answer`
 - pretrain: 권장 컬럼 `corpus`, `sentence_ls`

@@ -4,7 +4,7 @@
     // 자세한 내용을 보려면 https://go.microsoft.com/fwlink/?linkid=830387을(를) 방문하세요.
     "version": "0.2.0",
     "configurations": [
-        
+
         {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
@@ -80,7 +80,7 @@
                 "--preprocessing_batched=true",
                 "--preprocessing_num_workers=20",
                 "--preprocessing_batch_size=1000",
-                "--data_preprocessor_type=sft", // 프로세서 타입을 pretrain으로 바꿈.
+                "--dataset_type=sft", // 프로세서 타입을 pretrain으로 바꿈.
                 "--dataset_repo_ls",
                 "jp1924/CorpusForLLMNationalRecordsAndArchives",
                 "--data_name_map={\"jp1924/CorpusForLLMNationalRecordsAndArchives\": \"SFT\"}",
@@ -154,7 +154,7 @@
                 "--preprocessing_batched=true",
                 "--preprocessing_num_workers=20",
                 "--preprocessing_batch_size=1000",
-                "--data_preprocessor_type=pretrain", // 프로세서 타입을 pretrain으로 바꿈.
+                "--dataset_type=pretrain", // 프로세서 타입을 pretrain으로 바꿈.
                 "--dataset_repo_ls",
                 "jp1924/CorpusForLLMNationalRecordsAndArchives",
                 "--data_name_map={\"jp1924/CorpusForLLMNationalRecordsAndArchives\": \"CORPUS\"}",
